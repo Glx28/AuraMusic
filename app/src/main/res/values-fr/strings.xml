@@ -1089,4 +1089,8 @@
     <string name="watching_auramusic">Regarder AuraMusic</string>
     <string name="watch_on_youtube">Regarder sur YouTube</string>
     <string name="saved_videos">Vidéos enregistrées</string>
+    <string name="video_player_show_replies">%1$s réponses</string>
+    <string name="video_player_hide_replies">Masquer %1$d réponses</string>
+    <string name="video_player_more_replies">Afficher plus de réponses</string>
+    <string name="video_player_pinned">Épinglé</string>
 </resources>
