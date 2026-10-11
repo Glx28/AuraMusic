@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -137,6 +138,20 @@ fun VideosScreen(
             .distinctUntilChanged()
     }.collectAsState(initial = VideoPlaybackManager.uiState.value.session?.videoId)
     val isCurrentlyPlaying: (String) -> Boolean = { it == nowPlayingVideoId }
+
+    // Watch progress per video, keyed by id. Read once at the top of the screen (not per
+    // row) and driven by DataStore, so the watch bars repaint as playback records progress
+    // and a tap on any card knows where that video was left.
+    val watchHistoryById: Map<String, VideoPlaybackManager.VideoHistoryEntry> by remember {
+        VideoPlaybackManager.videoHistoryFlow(context)
+            .map { history -> history.associateBy { it.videoId } }
+            .distinctUntilChanged()
+    }.collectAsState(initial = emptyMap())
+    val resumePositionFor: (String) -> Long = { videoId ->
+        // Only a partially watched video resumes; a finished one starts over.
+        val entry = watchHistoryById[videoId]
+        if (entry == null || !entry.shouldResume) 0L else entry.positionMs
+    }
 
     var feed by remember { mutableStateOf<List<YouTubeVideoItem>>(emptyList()) }
     var continuation by remember { mutableStateOf<String?>(null) }
@@ -361,6 +376,7 @@ else -> {
                             publishedTimeText = video.publishedTimeText,
                             thumbnails = video.thumbnails,
                             channels = video.channels,
+                            startPositionMs = resumePositionFor(video.videoId),
                         )
                     }
                      val openChannel: (String) -> Unit = { channelId ->
@@ -397,6 +413,7 @@ else -> {
                                         FeedVideoGridCard(
                                             video = video,
                                             isNowPlaying = isCurrentlyPlaying(video.videoId),
+                                            watchProgress = watchHistoryById[video.videoId]?.watchProgress ?: 0f,
                                             onClick = { playVideo(video) },
                                             onChannelClick = openChannel,
                                         )
@@ -409,6 +426,7 @@ else -> {
                                     FeedVideoGridCard(
                                         video = video,
                                         isNowPlaying = isCurrentlyPlaying(video.videoId),
+                                        watchProgress = watchHistoryById[video.videoId]?.watchProgress ?: 0f,
                                         onClick = { playVideo(video) },
                                         onChannelClick = openChannel,
                                     )
@@ -450,6 +468,7 @@ else -> {
                                         FeedVideoListRow(
                                             video = video,
                                             isNowPlaying = isCurrentlyPlaying(video.videoId),
+                                            watchProgress = watchHistoryById[video.videoId]?.watchProgress ?: 0f,
                                             onClick = { playVideo(video) },
                                             onChannelClick = openChannel,
                                         )
@@ -462,6 +481,7 @@ else -> {
                                     FeedVideoListRow(
                                         video = video,
                                         isNowPlaying = isCurrentlyPlaying(video.videoId),
+                                        watchProgress = watchHistoryById[video.videoId]?.watchProgress ?: 0f,
                                         onClick = { playVideo(video) },
                                         onChannelClick = openChannel,
                                     )
@@ -490,6 +510,7 @@ else -> {
                                 FeedVideoGridCard(
                                     video = video,
                                     isNowPlaying = isCurrentlyPlaying(video.videoId),
+                                    watchProgress = watchHistoryById[video.videoId]?.watchProgress ?: 0f,
                                     onClick = { playVideo(video) },
                                     onChannelClick = openChannel,
                                 )
@@ -519,6 +540,7 @@ else -> {
                                 FeedVideoListRow(
                                     video = video,
                                     isNowPlaying = isCurrentlyPlaying(video.videoId),
+                                    watchProgress = watchHistoryById[video.videoId]?.watchProgress ?: 0f,
                                     onClick = { playVideo(video) },
                                     onChannelClick = openChannel,
                                 )
@@ -807,6 +829,29 @@ private fun LoadMoreShimmer(columns: Int, gridView: Boolean) {
     }
 }
 
+/**
+ * The red watch bar along the bottom of a thumbnail. Deliberately two layers: a dark
+ * backing that stays visible over a bright thumbnail, and the watched portion on top, so
+ * the bar reads the same against a white sky and a black stage.
+ */
+@Composable
+internal fun VideoWatchBar(progress: Float, modifier: Modifier = Modifier) {
+    val watched = progress.coerceIn(0f, 1f)
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(3.dp)
+            .background(Color.Black.copy(alpha = 0.45f)),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(watched)
+                .fillMaxHeight()
+                .background(Color(0xFFFF0033)),
+        )
+    }
+}
+
 @Composable
 internal fun NowPlayingBars(color: Color, modifier: Modifier = Modifier) {
     val transition = rememberInfiniteTransition(label = "nowPlaying")
@@ -924,6 +969,7 @@ private fun FeedVideoContextMenu(
 internal fun FeedVideoGridCard(
     video: YouTubeVideoItem,
     isNowPlaying: Boolean,
+    watchProgress: Float = 0f,
     onClick: () -> Unit,
     onChannelClick: (String) -> Unit,
 ) {
@@ -1035,6 +1081,18 @@ internal fun FeedVideoGridCard(
                     )
                 }
             }
+
+            // Watch bar along the thumbnail's bottom edge: how much of this video was
+            // already watched. A finished video keeps a full bar, which is the only hint
+            // that a row is "already seen" rather than brand new.
+            if (watchProgress > 0f) {
+                VideoWatchBar(
+                    progress = watchProgress,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth(),
+                )
+            }
         }
 
         // Inset the text block so the card's rounded corners don't clip the
@@ -1115,6 +1173,7 @@ internal fun FeedVideoGridCard(
 internal fun FeedVideoListRow(
     video: YouTubeVideoItem,
     isNowPlaying: Boolean,
+    watchProgress: Float = 0f,
     onClick: () -> Unit,
     onChannelClick: (String) -> Unit,
 ) {
@@ -1181,6 +1240,15 @@ internal fun FeedVideoListRow(
                         fontWeight = FontWeight.Medium
                     )
                 }
+            }
+
+            if (watchProgress > 0f) {
+                VideoWatchBar(
+                    progress = watchProgress,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth(),
+                )
             }
         }
 

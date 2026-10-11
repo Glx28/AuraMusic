@@ -56,12 +56,15 @@ fun AuraCanvasImage(
     durationMs: Long? = null,
     @Suppress("UNUSED_PARAMETER") candidateTracks: List<String> = emptyList(),
 ) {
+    val context = LocalContext.current
     val (enabled, _) = rememberPreference(AuraCanvasEnabledKey, defaultValue = false)
     var canvasUrl by remember(title, artist, album, durationMs) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(title, artist, album, durationMs, enabled) {
         canvasUrl = null
         if (!enabled) return@LaunchedEffect
+        // Give the repository its context so resolved URLs survive a restart.
+        AuraCanvasRepository.attachContext(context)
         canvasUrl = runCatching {
             AuraCanvasRepository.findCanvasUrl(title, artist, album, durationMs)
         }.getOrNull()

@@ -116,10 +116,12 @@ class VideoRecommendationManager(private val context: Context) {
     private suspend fun buildContinueWatching(
         history: List<VideoPlaybackManager.VideoHistoryEntry>,
     ): List<com.auramusic.innertube.models.YouTubeVideoItem> {
+        // Anything the user started but did not finish. The thresholds are shared with
+        // the player so the section, the card bars and "does this resume?" never disagree.
         val partial = history.filter { entry ->
             entry.durationMs > 0 &&
-                entry.positionMs > entry.durationMs * 0.2 &&
-                entry.positionMs < entry.durationMs * 0.85
+                entry.watchProgress > RESUME_MIN_PROGRESS &&
+                entry.watchProgress < WATCHED_PROGRESS
         }.sortedByDescending { it.lastPlayedAt }
             .take(10)
 
@@ -284,7 +286,16 @@ class VideoRecommendationManager(private val context: Context) {
         /** Refresh the personalised feed after this many new video watches. */
         const val REFRESH_THRESHOLD = 3
 
-        private val sharedSections = MutableStateFlow<List<FeedSection>>(emptyList())
+        internal val sharedSections = MutableStateFlow<List<FeedSection>>(emptyList())
         private val sharedLoading = MutableStateFlow(false)
+
+        /**
+         * Drops the built sections so the next screen entry rebuilds them. Used when the
+         * history changed in a way the rebuild threshold would not notice (a video that
+         * just finished and therefore left Continue Watching).
+         */
+        fun invalidateSections() {
+            sharedSections.value = emptyList()
+        }
     }
 }

@@ -139,7 +139,27 @@ object VideoPlaybackManager {
         val lastPlayedAt: Long,
         val positionMs: Long = 0,
         val durationMs: Long = 0,
-    )
+    ) {
+        /**
+         * How much of the video was actually watched, 0..1. Zero while the duration is
+         * still unknown, which is what keeps a just-started video from drawing an empty
+         * watch bar over its own thumbnail.
+         */
+        val watchProgress: Float
+            get() = if (durationMs <= 0L) 0f
+            else (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+
+        /** Watched to the end (or close enough) - these start over instead of resuming. */
+        val isWatched: Boolean
+            get() = watchProgress >= WATCHED_PROGRESS ||
+                (durationMs in 1 until MIN_RESUMABLE_DURATION_MS && watchProgress >= 0.5f)
+
+        /** Partially watched: there is a meaningful place to come back to. */
+        val shouldResume: Boolean
+            get() = durationMs >= MIN_RESUMABLE_DURATION_MS &&
+                watchProgress > RESUME_MIN_PROGRESS &&
+                watchProgress < WATCHED_PROGRESS
+    }
 
     /** A channel the user subscribed to from a video/channel screen. */
     data class VideoSubscribedChannel(
@@ -330,6 +350,10 @@ object VideoPlaybackManager {
                 }
             }
             if (playbackState == Player.STATE_ENDED) {
+                // Mark it watched before moving on. The 10s ticker only ever saw the
+                // position from before the last stretch, so a finished video could be
+                // left in Continue Watching at ~90% and resume into its final seconds.
+                markCurrentWatched()
                 if (_uiState.value.autoplayEnabled) playNext()
             }
         }
@@ -407,8 +431,8 @@ object VideoPlaybackManager {
         }
     }
 
-    fun play(context: Context, videoId: String, title: String, channelName: String = "") {
-        playWithDetails(context, videoId, title, channelName)
+    fun play(context: Context, videoId: String, title: String, channelName: String = "", startPositionMs: Long = 0L) {
+        playWithDetails(context, videoId, title, channelName, startPositionMs = startPositionMs)
     }
 
     /**
@@ -435,6 +459,7 @@ object VideoPlaybackManager {
         publishedTimeText: String? = null,
         thumbnails: List<com.auramusic.innertube.models.Thumbnail> = emptyList(),
         channels: List<com.auramusic.innertube.models.Artist> = emptyList(),
+        startPositionMs: Long = 0L,
     ) {
         val current = _uiState.value
         if (current.session?.videoId == videoId) {
@@ -525,7 +550,7 @@ object VideoPlaybackManager {
                 _uiState.update { it.copy(isBuffering = false, error = "Could not load video") }
                 return@launch
             }
-            loadMediaSourceInto(videoId, source, title, channelName, channelThumbnail ?: bestThumbnail)
+            loadMediaSourceInto(videoId, source, title, channelName, channelThumbnail ?: bestThumbnail, startPositionMs)
         }
         scope.launch {
             // Enrich metadata (fills gaps for views/description/channel avatar), then load content.
@@ -1861,7 +1886,32 @@ object VideoPlaybackManager {
         )
     }
 
-    private fun recordHistoryEntry(entry: VideoHistoryEntry) {
+    /**
+     * Closes the current video out as fully watched, so it drops out of Continue Watching
+     * and its card bar reads as finished instead of "almost done".
+     */
+    private fun markCurrentWatched() {
+        val session = _uiState.value.session ?: return
+        val duration = _positionState.value.second
+            .takeIf { it > 0 }
+            ?: _uiState.value.durationMs
+        if (duration <= 0) return
+        recordHistoryEntry(
+            VideoHistoryEntry(
+                videoId = session.videoId,
+                title = session.title,
+                channelName = session.channelName,
+                channelId = session.channelId,
+                thumbnailUrl = session.channelThumbnail,
+                lastPlayedAt = System.currentTimeMillis(),
+                positionMs = duration,
+                durationMs = duration,
+            ),
+            refreshSections = true,
+        )
+    }
+
+    private fun recordHistoryEntry(entry: VideoHistoryEntry, refreshSections: Boolean = false) {
         val ctx = currentContext ?: return
         scope.launch {
             withContext(Dispatchers.IO) {
@@ -1875,6 +1925,12 @@ object VideoPlaybackManager {
                 } catch (e: Exception) {
                     // History is best-effort; never let persistence break playback.
                 }
+            }
+            if (refreshSections) {
+                // A video just finished: rebuild Continue Watching so the finished row is
+                // gone instead of sitting there with a full bar waiting to be resumed.
+                VideoRecommendationManager.invalidateSections()
+                onVideoPlayed?.invoke()
             }
         }
     }
@@ -1972,6 +2028,16 @@ object VideoPlaybackManager {
 }
 
 private const val MAX_VIDEO_HISTORY_ENTRIES = 100
+
+/**
+ * Watch fractions shared by every surface that draws a watch bar or decides whether a
+ * video resumes: below [RESUME_MIN_PROGRESS] a tap is a fresh start (the user only nudged
+ * the playhead), at or above [WATCHED_PROGRESS] the video counts as watched.
+ */
+const val RESUME_MIN_PROGRESS = 0.02f
+const val WATCHED_PROGRESS = 0.95f
+/** Short videos are not worth resuming: under this a pause looks like a completed watch. */
+const val MIN_RESUMABLE_DURATION_MS = 15_000L
 
 /** How often playback progress is published while the playhead is actually moving. */
 private const val ACTIVE_TICK_MS = 500L

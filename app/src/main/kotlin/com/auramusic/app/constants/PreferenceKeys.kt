@@ -43,6 +43,12 @@ val SavedVideoIdsKey = stringSetPreferencesKey("videoSavedIds")
 val SavedVideosKey = stringPreferencesKey("videoSavedJson")
 val LikedVideosKey = stringPreferencesKey("videoLikedJson")
 val VideoHistoryKey = stringPreferencesKey("videoHistoryJson")
+/**
+ * Persisted canvas lookups: {"<normalized query>": {"u": url|"", "e": expiryMs}}.
+ * Lives in DataStore so a track resolved once does not go back to the canvas server
+ * after a restart - the server has its own KV cache, but a request is still a request.
+ */
+val CanvasUrlCacheKey = stringPreferencesKey("canvasUrlCacheJson")
 val VideoSubscribedChannelsKey = stringPreferencesKey("videoSubscribedChannelsJson")
 val HidePlayerThumbnailKey = booleanPreferencesKey("hidePlayerThumbnail")
 val CropAlbumArtKey = booleanPreferencesKey("cropAlbumArt")

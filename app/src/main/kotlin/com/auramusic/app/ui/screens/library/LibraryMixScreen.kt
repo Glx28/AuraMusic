@@ -161,6 +161,8 @@ fun LibraryMixScreen(
             videoId = entry.videoId,
             title = entry.title,
             channelName = entry.channelName,
+            // A finished video starts over; a partially watched one picks up where it left.
+            startPositionMs = if (entry.shouldResume) entry.positionMs else 0L,
         )
     }
      val openVideoChannel: (String) -> Unit = { channelId ->
@@ -1024,9 +1026,7 @@ private fun VideoHistoryThumb(
     entry: VideoPlaybackManager.VideoHistoryEntry,
     onClick: () -> Unit,
 ) {
-    val watchProgress = if (entry.durationMs > 0) {
-        (entry.positionMs.toFloat() / entry.durationMs.toFloat()).coerceIn(0f, 1f)
-    } else 0f
+    val watchProgress = entry.watchProgress
 
     Column(
         modifier = Modifier

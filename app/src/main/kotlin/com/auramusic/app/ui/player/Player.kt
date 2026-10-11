@@ -723,6 +723,9 @@ fun BottomSheetPlayer(
     
     LaunchedEffect(auraCanvasEnabled, state.isExpanded, mediaMetadata) {
         if (auraCanvasEnabled && state.isExpanded && mediaMetadata?.isVideoSong != true) {
+            // The expanded player is the first thing that resolves canvases on a cold
+            // start, so it is also the first chance to hand the repository a context.
+            AuraCanvasRepository.attachContext(context)
             auraCanvasUrl = runCatching {
                 AuraCanvasRepository.findCanvasUrl(
                     title = mediaMetadata?.title,
