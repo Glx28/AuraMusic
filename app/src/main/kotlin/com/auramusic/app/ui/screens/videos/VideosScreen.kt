@@ -50,6 +50,12 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Subscriptions
+import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -66,6 +72,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -76,6 +83,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -155,24 +163,43 @@ fun VideosScreen(
     }
 
     var feed by remember { mutableStateOf<List<YouTubeVideoItem>>(emptyList()) }
-    var continuation by remember { mutableStateOf<String?>(null) }
+    // Paging no longer rides on a continuation token, so "is there more" is tracked
+    // directly: a fetch that adds nothing new counts against the budget below.
+    var canLoadMore by remember { mutableStateOf(true) }
     var isLoading by remember { mutableStateOf(true) }
     var isLoadingMore by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var isRefreshing by remember { mutableStateOf(false) }
 
+    /** Consecutive pages that brought nothing new; a few in a row end the feed. */
+    var emptyFetches by remember { mutableIntStateOf(0) }
+
     val pullRefreshState = rememberPullToRefreshState()
     val scope = rememberCoroutineScope()
 
+    /** Rotates the feed query, steered by the recently watched videos and channels. */
+    suspend fun nextFeedQuery(): String {
+        val history = watchHistoryById.values.toList()
+        val keywords = com.auramusic.app.video.VideoFeedQueryPicker.keywordsFrom(
+            titles = history.map { it.title },
+            channels = history.map { it.channelName },
+        )
+        return com.auramusic.app.video.VideoFeedQueryPicker.nextQuery(keywords)
+    }
+
     suspend fun fetchFeed(showError: Boolean = true) {
+        // A fresh query per fetch: the feed changes on refresh instead of replaying the
+        // same first page, and it follows what has been watched.
+        val query = nextFeedQuery()
         withContext(Dispatchers.IO) {
-            val result = YouTube.youtubeCategoryFeed(context.getString(R.string.video_category_music_query)).getOrNull()
+            val result = YouTube.youtubeCategoryFeed(query).getOrNull()
             if (result != null && result.items.isNotEmpty()) {
                 // Only keep what YouTube itself reports as music, and drop repeats within the
                 // page: the grid keys rows by video id and a duplicate throws at runtime.
                 feed = com.auramusic.app.video.MusicContentFilter.filter(result.items)
                     .distinctBy { it.videoId }
-                continuation = result.continuation
+                emptyFetches = 0
+                canLoadMore = true
                 error = null
             } else if (showError) {
                 error = context.getString(R.string.videos_feed_error)
@@ -186,7 +213,8 @@ fun VideosScreen(
             isLoading = true
             error = null
             feed = emptyList()
-            continuation = null
+            canLoadMore = true
+            emptyFetches = 0
         }
         fetchFeed()
     }
@@ -197,29 +225,41 @@ fun VideosScreen(
         isRefreshing = false
     }
 
+    /**
+     * Next page of the feed.
+     *
+     * YouTube answers a search continuation with an empty page now, so paging is done by
+     * asking for a fresh query instead - which also means the feed keeps changing, and
+     * the query follows what has been watched rather than staying one fixed phrase.
+     */
     suspend fun loadMore() {
         if (isLoadingMore) return
-        val cont = continuation ?: return
         isLoadingMore = true
         withContext(Dispatchers.IO) {
-            val result = YouTube.youtubeCategoryFeed(context.getString(R.string.video_category_music_query), cont).getOrNull()
-            result?.takeIf { it.items.isNotEmpty() }?.let {
-                // Continuation pages can repeat videos; dedupe so the lazy list
-                // never crashes on duplicate keys and pagination terminates.
+            val query = nextFeedQuery()
+            val result = YouTube.youtubeCategoryFeed(query).getOrNull()
+            result?.takeIf { it.items.isNotEmpty() }?.let { page ->
+                // Overlapping queries repeat videos; dedupe so the lazy list never sees
+                // duplicate keys.
                 val seen = feed.mapTo(HashSet()) { it.videoId }
-                val musicOnly = com.auramusic.app.video.MusicContentFilter
-                    .filter(it.items)
+                val fresh = com.auramusic.app.video.MusicContentFilter
+                    .filter(page.items)
                     .filter { video -> seen.add(video.videoId) }
-                if (musicOnly.isNotEmpty()) {
-                    feed = feed + musicOnly
-                    continuation = it.continuation
+                if (fresh.isNotEmpty()) {
+                    feed = feed + fresh
+                    emptyFetches = 0
+                    canLoadMore = true
                 } else {
-                    continuation = null
+                    // Rotating queries overlap; a couple of barren fetches is normal,
+                    // several in a row means YouTube has nothing left to give.
+                    emptyFetches++
+                    if (emptyFetches >= MAX_EMPTY_FEED_FETCHES) canLoadMore = false
                 }
             }
         }
         isLoadingMore = false
     }
+
 
     val columns = when {
         configuration.screenWidthDp >= 550 -> 3
@@ -397,15 +437,7 @@ else -> {
                                         key = "section_${sectionIndex}_${section.title}",
                                         span = { GridItemSpan(maxLineSpan) }
                                     ) {
-                                        Column(modifier = Modifier.padding(top = 8.dp)) {
-                                            Text(
-                                                text = section.title,
-                                                style = MaterialTheme.typography.titleMedium,
-                                                fontWeight = FontWeight.Bold,
-                                                color = MaterialTheme.colorScheme.onSurface,
-                                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                                            )
-                                        }
+                                        SectionHeader(title = section.title)
                                     }
                                     items(
                                         items = section.videos,
@@ -419,6 +451,14 @@ else -> {
                                             onChannelClick = openChannel,
                                         )
                                     }
+                                }
+                                // The main feed had no heading at all, so it ran straight
+                                // on from Subscriptions and looked like part of it.
+                                item(
+                                    key = "feed_header",
+                                    span = { GridItemSpan(maxLineSpan) },
+                                ) {
+                                    SectionHeader(title = stringResource(R.string.video_section_feed))
                                 }
                                 items(
                                     items = feed,
@@ -438,7 +478,7 @@ else -> {
                                 ) {
                                     GridListFooter(
                                         isLoadingMore = isLoadingMore,
-                                        hasMore = continuation != null,
+                                        hasMore = canLoadMore,
                                         columns = columns,
                                         gridView = gridView,
                                     )
@@ -452,15 +492,7 @@ else -> {
                             ) {
                                 personalSections.forEachIndexed { sectionIndex, section ->
                                     item(key = "section_${sectionIndex}_${section.title}") {
-                                        Column(modifier = Modifier.padding(top = 8.dp)) {
-                                            Text(
-                                                text = section.title,
-                                                style = MaterialTheme.typography.titleMedium,
-                                                fontWeight = FontWeight.Bold,
-                                                color = MaterialTheme.colorScheme.onSurface,
-                                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                                            )
-                                        }
+                                        SectionHeader(title = section.title)
                                     }
                                     items(
                                         items = section.videos,
@@ -474,6 +506,9 @@ else -> {
                                             onChannelClick = openChannel,
                                         )
                                     }
+                                }
+                                item(key = "feed_header") {
+                                    SectionHeader(title = stringResource(R.string.video_section_feed))
                                 }
                                 items(
                                     items = feed,
@@ -490,7 +525,7 @@ else -> {
                                 item(key = "feed_footer") {
                                     GridListFooter(
                                         isLoadingMore = isLoadingMore,
-                                        hasMore = continuation != null,
+                                        hasMore = canLoadMore,
                                         columns = columns,
                                         gridView = gridView,
                                     )
@@ -522,7 +557,7 @@ else -> {
                             ) {
                                 GridListFooter(
                                     isLoadingMore = isLoadingMore,
-                                    hasMore = continuation != null,
+                                    hasMore = canLoadMore,
                                     columns = columns,
                                     gridView = gridView,
                                 )
@@ -549,7 +584,7 @@ else -> {
                             item(key = "feed_footer") {
                                 GridListFooter(
                                     isLoadingMore = isLoadingMore,
-                                    hasMore = continuation != null,
+                                    hasMore = canLoadMore,
                                     columns = columns,
                                     gridView = gridView,
                                 )
@@ -835,6 +870,49 @@ private fun LoadMoreShimmer(columns: Int, gridView: Boolean) {
  * backing that stays visible over a bright thumbnail, and the watched portion on top, so
  * the bar reads the same against a white sky and a black stage.
  */
+/**
+ * Section heading, with an icon that says what the section is.
+ *
+ * The sections are titled only, so a screen with four of them reads as a wall of
+ * headings with no cue about which is which. Each known section gets its own Material
+ * icon; an unrecognised title simply renders without one rather than guessing.
+ */
+@Composable
+private fun SectionHeader(title: String, modifier: Modifier = Modifier) {
+    val icon = sectionIconFor(title)
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (icon != null) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+private fun sectionIconFor(title: String): ImageVector? = when {
+    title.contains("continue", ignoreCase = true) -> Icons.Filled.PlayArrow
+    title.contains("channel", ignoreCase = true) -> Icons.Filled.Person
+    title.contains("recommend", ignoreCase = true) -> Icons.Filled.AutoAwesome
+    title.contains("subscription", ignoreCase = true) -> Icons.Filled.Subscriptions
+    title.contains("feed", ignoreCase = true) -> Icons.Filled.VideoLibrary
+    else -> null
+}
+
 @Composable
 internal fun VideoWatchBar(progress: Float, modifier: Modifier = Modifier) {
     val watched = progress.coerceIn(0f, 1f)
@@ -1330,3 +1408,6 @@ internal fun FeedVideoListRow(
         }
     }
 }
+
+/** Consecutive barren feed pages before the feed stops offering more. */
+private const val MAX_EMPTY_FEED_FETCHES = 3

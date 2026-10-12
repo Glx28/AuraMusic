@@ -198,7 +198,10 @@ data class YouTubeChannelPage(
                         ?.takeIf { it.isNotBlank() }
             }
 
-            // Videos live under either tabRenderer or richGridRenderer.
+            // Videos live under either tabRenderer or richGridRenderer on a first page,
+            // and under appendContinuationItemsAction once the user scrolls past it -
+            // a continuation response carries no "contents" at all, which is why the
+            // second page of a channel used to come back empty.
             val videos = mutableListOf<YouTubeVideoItem>()
             var continuation: String? = null
             root["contents"]?.obj()?.get("twoColumnBrowseResultsRenderer")?.obj()
@@ -220,37 +223,28 @@ data class YouTubeChannelPage(
                             sectionEl.obj()?.get("richItemRenderer") != null -> listOf(sectionEl)
                             else -> emptyList()
                         }
-                        items.forEach { itemEl ->
-                            val richContent = itemEl.obj()?.get("richItemRenderer")
-                                ?.obj()?.get("content")?.obj()
-                            val directVideoRenderer = itemEl.obj()?.get("videoRenderer")?.obj()
-                            val item = when {
-                                directVideoRenderer != null -> {
-                                    parseVideoRenderer(directVideoRenderer)?.let(videos::add)
-                                    null
-                                }
-                                richContent != null -> richContent
-                                else -> itemEl.obj()
-                            } ?: return@forEach
-                            // richItemRenderer content may be a videoRenderer, reelItemRenderer
-                            // (Shorts) or the newer lockupViewModel.
-                            val rendered = item["videoRenderer"]?.obj()
-                                ?: item["reelItemRenderer"]?.obj()
-                            if (rendered != null) {
-                                parseVideoRenderer(rendered)?.let(videos::add)
-                            } else {
-                                item["lockupViewModel"]?.let { raw ->
-                                    runCatching { Lockup.parse(raw) }
-                                        ?.getOrNull()
-                                        ?.let(Lockup::toVideoItem)
-                                        ?.let(videos::add)
-                                }
-                            }
-                        }
+                        parseVideoItems(items, videos)?.let { continuation = it }
                         // Continuation token sits either in the section or the grid.
                         collectContinuation(sectionEl)?.let { continuation = it }
                     }
                 }
+
+            // Continuation pages: the appended rows arrive as a flat item list under
+            // onResponseReceivedActions, together with the token for the next page.
+            root["onResponseReceivedActions"].arr().forEach { actionEl ->
+                actionEl.obj()?.get("appendContinuationItemsAction")?.obj()
+                    ?.get("continuationItems").arr()
+                    .takeIf { it.isNotEmpty() }
+                    ?.let { appended ->
+                        parseVideoItems(appended, videos)?.let { continuation = it }
+                    }
+                actionEl.obj()?.get("reloadContinuationItemsCommand")?.obj()
+                    ?.get("continuationItems").arr()
+                    .takeIf { it.isNotEmpty() }
+                    ?.let { appended ->
+                        parseVideoItems(appended, videos)?.let { continuation = it }
+                    }
+            }
 
             return YouTubeChannelPage(
                 channelId = channelId,
@@ -318,9 +312,59 @@ data class YouTubeChannelPage(
                 }?.takeIf { it.isNotBlank() }
         }
 
+        /**
+         * Largest image offered for [obj]. The microformat lists a banner at several
+         * widths and the widest is not always the last one, which is why the channel
+         * art arrived smaller than the space it was drawn into.
+         */
         private fun thumbnailUrlHelper(obj: JsonObject): String? =
-            obj["thumbnail"]?.jsonObject?.get("thumbnails")?.jsonArray
-                ?.lastOrNull()?.jsonObject?.get("url")?.jsonPrimitive?.content
+            obj["thumbnail"]?.obj()?.get("thumbnails").arr()
+                .mapNotNull { it.obj()?.get("url")?.str() }
+                .maxByOrNull { url ->
+                    Regex("""w(\d+)""").find(url)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                }
+
+        /**
+         * Reads one flat list of grid items - richItemRenderer, videoRenderer, or the
+         * newer lockupViewModel - and returns the continuation token found in it, if any.
+         */
+        private fun parseVideoItems(
+            items: List<JsonElement>,
+            videos: MutableList<YouTubeVideoItem>,
+        ): String? {
+            var continuation: String? = null
+            items.forEach { itemEl ->
+                val richContent = itemEl.obj()?.get("richItemRenderer")
+                    ?.obj()?.get("content")?.obj()
+                val directVideoRenderer = itemEl.obj()?.get("videoRenderer")?.obj()
+                val item = when {
+                    directVideoRenderer != null -> {
+                        parseVideoRenderer(directVideoRenderer)?.let(videos::add)
+                        null
+                    }
+                    richContent != null -> richContent
+                    else -> itemEl.obj()
+                }
+                if (item != null) {
+                    // richItemRenderer content may be a videoRenderer, reelItemRenderer
+                    // (Shorts) or the newer lockupViewModel.
+                    val rendered = item["videoRenderer"]?.obj()
+                        ?: item["reelItemRenderer"]?.obj()
+                    if (rendered != null) {
+                        parseVideoRenderer(rendered)?.let(videos::add)
+                    } else {
+                        item["lockupViewModel"]?.let { raw ->
+                            runCatching { Lockup.parse(raw) }
+                                ?.getOrNull()
+                                ?.let(Lockup::toVideoItem)
+                                ?.let(videos::add)
+                        }
+                    }
+                }
+                collectContinuation(itemEl)?.let { continuation = it }
+            }
+            return continuation
+        }
 
         private fun collectContinuation(element: JsonElement): String? {
             val direct = element.jsonObject["continuationItemRenderer"]?.jsonObject

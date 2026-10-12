@@ -544,7 +544,9 @@ private fun ChannelHeaderSection(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(150.dp),
+                // Channel art is far wider than it is tall; 150dp forced the middle
+                // slice out of a banner that then read as a cropped, too-small image.
+                .height(220.dp),
         ) {
             if (header?.bannerUrl != null) {
                 AsyncImage(
