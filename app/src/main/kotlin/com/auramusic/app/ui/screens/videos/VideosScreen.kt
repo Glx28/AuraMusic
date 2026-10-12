@@ -193,9 +193,15 @@ fun VideosScreen(
     }
 
     suspend fun fetchFeed(showError: Boolean = true) {
-        // A fresh query per fetch: the feed changes on refresh instead of replaying the
-        // same first page, and it follows what has been watched.
-        val query = nextFeedQuery()
+        // The first page asks for something certain rather than a rotated query: a
+        // personalised phrase can come back with no music in it at all, every row gets
+        // filtered away, and the screen opens on nothing while each of those checks
+        // waits on the network. Rotation starts from the second page on.
+        val query = if (feed.isEmpty()) {
+            context.getString(R.string.video_category_music_query)
+        } else {
+            nextFeedQuery()
+        }
         withContext(Dispatchers.IO) {
             val result = YouTube.youtubeCategoryFeed(query).getOrNull()
             if (result != null && result.items.isNotEmpty()) {
@@ -206,8 +212,20 @@ fun VideosScreen(
                 emptyFetches = 0
                 canLoadMore = true
                 error = null
-            } else if (showError) {
-                error = context.getString(R.string.videos_feed_error)
+            } else {
+                // The sure query can still come back thin. One rotated attempt before
+                // showing an empty screen, so a bad round never blanks the feed.
+                val retry = withContext(Dispatchers.IO) {
+                    YouTube.youtubeCategoryFeed(nextFeedQuery()).getOrNull()
+                }?.items
+                    ?.let { com.auramusic.app.video.MusicContentFilter.filter(it).distinctBy { v -> v.videoId } }
+                    ?.takeIf { it.isNotEmpty() }
+                if (retry != null) {
+                    feed = retry
+                    error = null
+                } else if (showError) {
+                    error = context.getString(R.string.videos_feed_error)
+                }
             }
         }
         isLoading = false
@@ -241,26 +259,30 @@ fun VideosScreen(
         if (isLoadingMore) return
         isLoadingMore = true
         withContext(Dispatchers.IO) {
-            val query = nextFeedQuery()
-            val result = YouTube.youtubeCategoryFeed(query).getOrNull()
-            result?.takeIf { it.items.isNotEmpty() }?.let { page ->
-                // Overlapping queries repeat videos; dedupe so the lazy list never sees
-                // duplicate keys.
+            // Rotating queries overlap heavily, so a page can come back holding nothing
+            // this list has not already shown. One attempt is not enough to call the feed
+            // finished - it takes several in a row, and each one asks a different
+            // question, which is what stopped the spinner from ever turning into rows.
+            var addedThisRound = false
+            for (attempt in 0 until MAX_EMPTY_FEED_FETCHES) {
+                val result = YouTube.youtubeCategoryFeed(nextFeedQuery()).getOrNull()
+                val page = result?.items
+                    ?.let { com.auramusic.app.video.MusicContentFilter.filter(it) }
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: continue
+
                 val seen = feed.mapTo(HashSet()) { it.videoId }
-                val fresh = com.auramusic.app.video.MusicContentFilter
-                    .filter(page.items)
-                    .filter { video -> seen.add(video.videoId) }
+                val fresh = page.filter { video -> seen.add(video.videoId) }
                 if (fresh.isNotEmpty()) {
                     feed = feed + fresh
-                    emptyFetches = 0
-                    canLoadMore = true
-                } else {
-                    // Rotating queries overlap; a couple of barren fetches is normal,
-                    // several in a row means YouTube has nothing left to give.
-                    emptyFetches++
-                    if (emptyFetches >= MAX_EMPTY_FEED_FETCHES) canLoadMore = false
+                    addedThisRound = true
+                    break
                 }
             }
+            // The feed is only finished once whole rounds of different queries have come
+            // back with nothing new at all.
+            emptyFetches = if (addedThisRound) 0 else emptyFetches + 1
+            canLoadMore = emptyFetches < MAX_EMPTY_FEED_FETCHES
         }
         isLoadingMore = false
     }
@@ -366,22 +388,23 @@ fun VideosScreen(
                 ),
             contentAlignment = Alignment.TopStart
         ) {
-            // Refresh indicator, styled like Home's: a contained spinner rather than a
-            // bare line across the top of the feed.
-            Column(modifier = Modifier.fillMaxWidth()) {
-                AnimatedVisibility(
-                    visible = isRefreshing && !isLoading,
-                    enter = androidx.compose.animation.fadeIn(),
-                    exit = androidx.compose.animation.fadeOut(),
+            // Refresh indicator, styled like Home's. It is drawn after the content so it
+            // is never hidden behind the first rows, and it takes part in the layout
+            // rather than floating over them - a spinner you cannot see is the same as
+            // no spinner at all when the list has not scrolled away.
+            androidx.compose.animation.AnimatedVisibility(
+                visible = isRefreshing && !isLoading,
+                enter = androidx.compose.animation.fadeIn(),
+                exit = androidx.compose.animation.fadeOut(),
+                modifier = Modifier.align(Alignment.TopCenter),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    shadowElevation = 3.dp,
+                    modifier = Modifier.padding(top = 8.dp),
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 10.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        ContainedLoadingIndicator()
-                    }
+                    ContainedLoadingIndicator(modifier = Modifier.padding(6.dp))
                 }
             }
             when {
@@ -452,10 +475,7 @@ else -> {
                                         key = "section_${sectionIndex}_${section.title}",
                                         span = { GridItemSpan(maxLineSpan) }
                                     ) {
-                                        SectionHeader(
-                                            title = section.title,
-                                            count = section.videos.size,
-                                        )
+                                        SectionHeader(title = section.title)
                                     }
                                     items(
                                         items = section.videos,
@@ -515,10 +535,7 @@ else -> {
                                 }
                                 personalSections.forEachIndexed { sectionIndex, section ->
                                     item(key = "section_${sectionIndex}_${section.title}") {
-                                        SectionHeader(
-                                            title = section.title,
-                                            count = section.videos.size,
-                                        )
+                                        SectionHeader(title = section.title)
                                     }
                                     items(
                                         items = section.videos,
@@ -941,51 +958,42 @@ private fun SectionsLoadingPlaceholder() {
 }
 
 @Composable
-private fun SectionHeader(title: String, count: Int? = null, modifier: Modifier = Modifier) {
+private fun SectionHeader(title: String, modifier: Modifier = Modifier) {
     val icon = sectionIconFor(title)
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .clip(RoundedCornerShape(18.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            // Air between sections: they used to run into each other with nothing
+            // marking where one ended, so a long scroll read as one flat run.
+            .padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         if (icon != null) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(13.dp))
-                    .background(MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.size(22.dp),
-                )
-            }
-            Spacer(modifier = Modifier.width(14.dp))
-        }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp),
             )
-            if (count != null && count > 0) {
-                Text(
-                    text = count.toString(),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
         }
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f, fill = false),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        // A short rule that trails off: a section marker without turning the heading
+        // into a labelled block of its own.
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(1.dp)
+                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+        )
     }
 }
 

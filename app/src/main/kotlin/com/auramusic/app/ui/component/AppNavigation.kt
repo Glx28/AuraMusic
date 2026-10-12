@@ -59,10 +59,11 @@ fun AppNavigationRail(
         modifier = modifier.fillMaxHeight(),
         containerColor = containerColor,
     ) {
+        // weight, not fillMaxWidth: filling the available width made the rail's own
+        // width follow it, so the whole control sat in the middle of the screen instead
+        // of hugging the edge.
         Column(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
+            modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
