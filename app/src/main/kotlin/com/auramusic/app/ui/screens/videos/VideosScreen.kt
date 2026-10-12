@@ -117,6 +117,9 @@ import com.auramusic.app.video.VideoPlaybackManager
 import com.auramusic.innertube.YouTube
 import com.auramusic.innertube.models.YouTubeVideoItem
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -183,14 +186,17 @@ fun VideosScreen(
     val scope = rememberCoroutineScope()
 
     /** Rotates the feed query, steered by the recently watched videos and channels. */
-    suspend fun nextFeedQuery(): String {
+    /** What the user has been watching, reduced to the words worth searching for. */
+    fun feedKeywords(): List<String> {
         val history = watchHistoryById.values.toList()
-        val keywords = com.auramusic.app.video.VideoFeedQueryPicker.keywordsFrom(
+        return com.auramusic.app.video.VideoFeedQueryPicker.keywordsFrom(
             titles = history.map { it.title },
             channels = history.map { it.channelName },
         )
-        return com.auramusic.app.video.VideoFeedQueryPicker.nextQuery(keywords)
     }
+
+    suspend fun nextFeedQuery(): String =
+        com.auramusic.app.video.VideoFeedQueryPicker.nextQuery(feedKeywords())
 
     suspend fun fetchFeed(showError: Boolean = true) {
         // The first page asks for something certain rather than a rotated query: a
@@ -265,14 +271,31 @@ fun VideosScreen(
             // question, which is what stopped the spinner from ever turning into rows.
             var addedThisRound = false
             for (attempt in 0 until MAX_EMPTY_FEED_FETCHES) {
-                val result = YouTube.youtubeCategoryFeed(nextFeedQuery()).getOrNull()
-                val page = result?.items
-                    ?.let { com.auramusic.app.video.MusicContentFilter.filter(it) }
-                    ?.takeIf { it.isNotEmpty() }
-                    ?: continue
+                // Several queries per scroll rather than a longer wait: they run
+                // together, their results are checked against each other once, and the
+                // rows all arrive in the same update instead of trickling in.
+                val queries = com.auramusic.app.video.VideoFeedQueryPicker.nextQueries(
+                    historyKeywords = feedKeywords(),
+                    count = QUERIES_PER_FEED_PAGE,
+                )
+                val items = coroutineScope {
+                    queries
+                        .map { query -> async { YouTube.youtubeCategoryFeed(query).getOrNull()?.items.orEmpty() } }
+                        .awaitAll()
+                        .flatten()
+                }
+                if (items.isEmpty()) continue
+
+                // One pass over everything: the content check is the expensive part, and
+                // batching it across all of these queries costs far less than checking
+                // each page on its own.
+                val musicOnly = com.auramusic.app.video.MusicContentFilter
+                    .filter(items)
+                    .distinctBy { it.videoId }
+                if (musicOnly.isEmpty()) continue
 
                 val seen = feed.mapTo(HashSet()) { it.videoId }
-                val fresh = page.filter { video -> seen.add(video.videoId) }
+                val fresh = musicOnly.filter { video -> seen.add(video.videoId) }
                 if (fresh.isNotEmpty()) {
                     feed = feed + fresh
                     addedThisRound = true
@@ -1501,6 +1524,13 @@ internal fun FeedVideoListRow(
         }
     }
 }
+
+/**
+ * How many different queries one scroll goes out with. Rotated queries overlap heavily,
+ * so a single one often adds only a row or two before looking like it has stalled;
+ * asking for a few at a time fills the page in one update.
+ */
+private const val QUERIES_PER_FEED_PAGE = 4
 
 /** Consecutive barren feed pages before the feed stops offering more. */
 private const val MAX_EMPTY_FEED_FETCHES = 3

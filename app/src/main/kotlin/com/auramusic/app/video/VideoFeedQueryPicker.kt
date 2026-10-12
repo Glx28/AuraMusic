@@ -104,6 +104,20 @@ object VideoFeedQueryPicker {
             .ifEmpty { words.shuffled().take(limit) }
     }
 
+    /**
+     * Several different queries at once, for one page of scrolling.
+     *
+     * A single rotated query yields whatever overlaps the rows already on screen, which
+     * is why one scroll often added two or three videos and then looked broken. Asking a
+     * handful at a time fills the page properly, and because each one is drawn from the
+     * pool without repeating, the results stay varied rather than becoming the same
+     * genre three times over.
+     */
+    fun nextQueries(historyKeywords: List<String>, count: Int): List<String> =
+        (0 until count)
+            .map { nextQuery(historyKeywords) }
+            .distinct()
+
     /** Used by tests and by the "new feed" action to force variety. */
     fun reset() = synchronized(this) { recentQueries.clear() }
 }
