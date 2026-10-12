@@ -58,7 +58,9 @@ object AuraCanvasRepository {
     private const val REMOTE_BASE_URL = "https://canvas.auramusic.site"
 
     private const val POSITIVE_TTL_MS = 24 * 60 * 60 * 1000L    // 24h
-    private const val NEGATIVE_TTL_MS = 60 * 60 * 1000L         // 1h
+    // Short on purpose: a track that gets a canvas later must start showing it,
+    // and a stale negative is indistinguishable from "this track has none".
+    private const val NEGATIVE_TTL_MS = 15 * 60 * 1000L        // 15m
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -127,13 +129,26 @@ object AuraCanvasRepository {
     //  Remote layer (canvas server)
     // --------------------------------------------------------------
 
+    /**
+     * What a lookup produced. The distinction matters because only a definitive
+     * "this track has no canvas" is worth remembering: a server that was down or
+     * timed out must not leave every track in the library cached as canvas-less,
+     * which is exactly what happened when the server went bad and the answer was
+     * then persisted for the next day.
+     */
+    private sealed interface LookupResult {
+        data class Found(val url: String) : LookupResult
+        data object Missing : LookupResult
+        data object Failed : LookupResult
+    }
+
     private suspend fun remoteLookup(
         title: String?,
         artist: String?,
         album: String?,
         durationMs: Long?,
-    ): String? = withContext(Dispatchers.IO) {
-        if (title.isNullOrBlank() && artist.isNullOrBlank() && album.isNullOrBlank()) return@withContext null
+    ): LookupResult = withContext(Dispatchers.IO) {
+        if (title.isNullOrBlank() && artist.isNullOrBlank() && album.isNullOrBlank()) return@withContext LookupResult.Failed
         try {
             val response: HttpResponse = client.get("$REMOTE_BASE_URL/api/canvas") {
                 url {
@@ -143,16 +158,17 @@ object AuraCanvasRepository {
                     if (durationMs != null && durationMs > 0) parameters.append("durationMs", durationMs.toString())
                 }
             }
-            if (response.status == HttpStatusCode.NotFound) return@withContext null
+            if (response.status == HttpStatusCode.NotFound) return@withContext LookupResult.Missing
             if (!response.status.isSuccess()) {
                 Timber.w("AuraCanvas: remote HTTP ${response.status.value} for $title / $artist")
-                return@withContext null
+                return@withContext LookupResult.Failed
             }
             val body = response.bodyAsText()
-            extractCanvasUrl(body)
+            val url = extractCanvasUrl(body)
+            if (url.isNullOrBlank()) LookupResult.Missing else LookupResult.Found(url)
         } catch (t: Throwable) {
             Timber.w(t, "AuraCanvas: remote lookup failed for $title / $artist")
-            null
+            LookupResult.Failed
         }
     }
 
@@ -175,6 +191,7 @@ object AuraCanvasRepository {
     // --------------------------------------------------------------
 
     private const val MAX_PERSISTED_ENTRIES = 400
+    private const val CACHE_VERSION = "v2:" 
 
     private fun serializeCache(entries: Map<String, CacheEntry>): String {
         val array = org.json.JSONArray()
@@ -264,7 +281,10 @@ object AuraCanvasRepository {
         durationMs: Long? = null,
     ): String? {
         if (title.isNullOrBlank() && artist.isNullOrBlank() && album.isNullOrBlank()) return null
-        val key = listOf(title, artist, album, durationMs?.toString()).joinToString("\u0001") { normalize(it ?: "") }
+        // The prefix versions the cache: entries written before the miss/error
+        // distinction existed are unreachable rather than wrong for the next hour.
+        val key = CACHE_VERSION + listOf(title, artist, album, durationMs?.toString())
+            .joinToString("\u0001") { normalize(it ?: "") }
         var now = System.currentTimeMillis()
 
         // Memory, then disk: both use the same expiry, so a hit here is indistinguishable
@@ -281,17 +301,31 @@ object AuraCanvasRepository {
         }
 
         warmUp()
-        val remoteHit = remoteLookup(title, artist, album, durationMs)
-        now = System.currentTimeMillis()
-        synchronized(resultCache) {
-            resultCache[key] = CacheEntry(
-                remoteHit,
-                now + if (remoteHit != null) POSITIVE_TTL_MS else NEGATIVE_TTL_MS,
-            )
+        return when (val result = remoteLookup(title, artist, album, durationMs)) {
+            is LookupResult.Found -> {
+                remember(key, result.url, POSITIVE_TTL_MS)
+                result.url
+            }
+            // "No canvas for this track" is worth remembering, but only briefly: canvas
+            // coverage changes, and a long negative is how one track stays blank forever.
+            LookupResult.Missing -> {
+                remember(key, null, NEGATIVE_TTL_MS)
+                null
+            }
+            // The server was unreachable or broken. Cache nothing - the next attempt,
+            // be it seconds or minutes later, is the real answer.
+            LookupResult.Failed -> null
         }
-        // Remember it for the next launch. Failures are invisible on purpose: a lookup that
-        // already produced its answer must not turn into an error because of the cache.
+    }
+
+    /** Stores a lookup result in memory and, once loaded, on disk. */
+    private suspend fun remember(key: String, url: String?, ttlMs: Long) {
+        val now = System.currentTimeMillis()
+        synchronized(resultCache) {
+            resultCache[key] = CacheEntry(url, now + ttlMs)
+        }
+        // Remember it for the next launch. Failures are invisible on purpose: a lookup
+        // that already produced its answer must not turn into an error because of caching.
         if (appContext != null) persistCache()
-        return remoteHit
     }
 }
