@@ -30,6 +30,66 @@ data class YouTubeChannelPage(
         const val SHORTS_PARAMS = "EgZzaG9ydHPyBgUKA5oBAA%3D%3D"
         const val LIVE_PARAMS = "EgdzdHJlYW1z8gYECgJ6AA%3D%3D"
 
+        /**
+         * YouTube reshapes these payloads without warning, and a single unexpected
+         * element used to throw out of the whole parse - which is what left the
+         * channel screen rendering an empty shell with placeholder art. Every optional
+         * read below now goes through these helpers instead of casting directly.
+         */
+        private fun JsonElement?.obj(): JsonObject? = this as? JsonObject
+
+        private fun JsonElement?.arr(): List<JsonElement> = (this as? kotlinx.serialization.json.JsonArray).orEmpty()
+
+        private fun JsonElement?.str(): String? = runCatching {
+            (this as? kotlinx.serialization.json.JsonPrimitive)?.content
+        }.getOrNull()
+
+        /** First string value stored under [key] anywhere in this subtree. */
+        private fun JsonElement?.deepString(key: String, depth: Int = 0): String? {
+            if (depth > 8) return null
+            val obj = this?.obj() ?: return null
+            obj[key]?.str()?.takeIf { it.isNotBlank() }?.let { return it }
+            obj.values.forEach { child ->
+                child.deepString(key, depth + 1)?.let { return it }
+            }
+            return null
+        }
+
+        /** First object stored under [key] anywhere in this subtree. */
+        private fun JsonElement?.deepObject(key: String, depth: Int = 0): JsonObject? {
+            if (depth > 8) return null
+            val obj = this?.obj() ?: return null
+            (obj[key] as? JsonObject)?.let { return it }
+            obj.values.forEach { child ->
+                child.deepObject(key, depth + 1)?.let { return it }
+            }
+            return null
+        }
+
+        /**
+         * First array stored under [key] anywhere in this subtree. Image lists live under
+         * "sources" and "thumbnails", both of which are arrays - searching only for
+         * objects is why avatars came back empty while the banner (which has a separate
+         * reader) worked.
+         */
+        private fun JsonElement?.deepArray(key: String, depth: Int = 0): List<JsonElement>? {
+            if (depth > 8) return null
+            val obj = this?.obj() ?: return null
+            (obj[key] as? kotlinx.serialization.json.JsonArray)?.let { return it.toList() }
+            obj.values.forEach { child ->
+                child.deepArray(key, depth + 1)?.let { return it }
+            }
+            return null
+        }
+
+        /** Largest image URL under any "sources"/"thumbnails" list in this subtree. */
+        private fun JsonElement?.largestImageUrl(): String? {
+            val list = deepArray("sources") ?: deepArray("thumbnails") ?: return null
+            return list
+                .mapNotNull { src -> src.obj()?.get("url")?.str() }
+                .lastOrNull()
+        }
+
         fun fromJson(channelId: String, element: JsonElement): YouTubeChannelPage {
             val root = element.jsonObject
             val header = root["header"]?.jsonObject
@@ -46,24 +106,24 @@ data class YouTubeChannelPage(
             var videosCountText: String? = null
             var isSubscribed: Boolean? = null
 
-            header?.get("pageHeaderRenderer")?.jsonObject?.let { pageHeader ->
-                val content = pageHeader["content"]?.jsonObject
-                    ?.get("pageHeaderViewModel")?.jsonObject
+            header?.get("pageHeaderRenderer")?.obj()?.let { pageHeader ->
+                val content = pageHeader["content"]?.obj()
+                    ?.get("pageHeaderViewModel")?.obj()
                 // Title lives at pageHeaderViewModel.title.dynamicTextViewModel.text.content
                 // in 2024+ channel headers. Extracted here so the metadata fallback below
                 // is only used for legacy responses that don't have pageHeaderRenderer.
-                title = content?.get("title")?.jsonObject
-                    ?.get("dynamicTextViewModel")?.jsonObject
-                    ?.get("text")?.jsonObject
-                    ?.get("content")?.jsonPrimitive?.content
-                val metadataRows = content?.get("metadata")?.jsonObject
-                    ?.get("contentMetadataViewModel")?.jsonObject
-                    ?.get("metadataRows")?.jsonArray
-                metadataRows?.forEach { row ->
-                    val parts = row.jsonObject["metadataParts"]?.jsonArray
-                    parts?.forEach { part ->
-                        val text = part.jsonObject["text"]?.jsonObject
-                            ?.get("content")?.jsonPrimitive?.content
+                title = content?.get("title")?.obj()
+                    ?.get("dynamicTextViewModel")?.obj()
+                    ?.get("text")?.obj()
+                    ?.get("content")?.str()
+                    ?: content?.deepString("pageTitle")
+                val metadataRows = content?.get("metadata")?.obj()
+                    ?.get("contentMetadataViewModel")?.obj()
+                    ?.get("metadataRows").arr()
+                metadataRows.forEach { row ->
+                    val parts = row.obj()?.get("metadataParts").arr()
+                    parts.forEach { part ->
+                        val text = part.obj()?.get("text")?.obj()?.get("content")?.str()
                         if (text != null) {
                             when {
                                 text.contains("subscriber", ignoreCase = true) ->
@@ -74,54 +134,55 @@ data class YouTubeChannelPage(
                         }
                     }
                 }
-                val image = content?.get("image")?.jsonObject
-                    ?.get("decoratedAvatarViewModel")?.jsonObject
-                    ?.get("avatar")?.jsonObject
-                    ?.get("avatarViewModel")?.jsonObject
-                    ?.get("image")?.jsonObject
-                    ?.get("sources")?.jsonArray
-                    ?.mapNotNull { it.jsonObject["url"]?.jsonPrimitive?.content }
-                avatarUrl = image?.lastOrNull()
-                // 2024+ headers put the subscription toggle in the header actions;
-                // read its toggled state leniently (unknown if the shape changes).
-                isSubscribed = content?.get("actions")?.jsonArray
-                    ?.mapNotNull { action ->
-                        action.jsonObject["contentActionButtonViewModel"]?.jsonObject
-                            ?.get("buttonViewModel")?.jsonObject
-                            ?.get("isToggled")?.jsonPrimitive?.content
-                            ?: action.jsonObject["subscriptionNotificationToggleButtonRenderer"]
-                                ?.jsonObject?.get("isSubscribed")?.jsonPrimitive?.content
-                    }
-                    ?.firstOrNull { it == "true" || it == "false" }
+                // Same text, different nesting: the row parts live under
+                // metadataParts[].text.content in some builds and contentMetadataViewModel
+                // elsewhere, so the counts are also picked up by name.
+                if (subscriberCountText == null) {
+                    content?.deepString("content")?.takeIf { it.contains("subscriber", true) }
+                        ?.let { subscriberCountText = it }
+                }
+                avatarUrl = content?.get("image")?.obj()
+                    ?.get("decoratedAvatarViewModel")?.obj()
+                    ?.get("avatar")?.obj()
+                    ?.get("avatarViewModel")?.obj()
+                    ?.get("image")?.largestImageUrl()
+                    ?: content?.get("image")?.largestImageUrl()
+                // 2025+ headers carry the banner inside the same view model; reading it
+                // here is what stops the header from rendering a flat grey block.
+                bannerUrl = content?.get("banner")?.largestImageUrl()
+                // The subscription toggle moved again: it used to be an array of
+                // contentActionButtonViewModel, now it is flexibleActionsViewModel with
+                // rows of actions. Search the whole actions subtree instead of assuming
+                // one of the two shapes - and never throw if neither matches.
+                val actions = content?.get("actions")
+                isSubscribed = actions.deepString("isToggled")?.takeIf { it == "true" || it == "false" }
                     ?.let { it == "true" }
+                    ?: actions.deepString("isSubscribed")?.takeIf { it == "true" || it == "false" }
+                        ?.let { it == "true" }
             }
-            header?.get("c4TabbedHeaderRenderer")?.jsonObject?.let { c4 ->
-                title = c4["title"]?.jsonObject?.get("simpleText")?.jsonPrimitive?.content
-                avatarUrl = c4["avatar"]?.jsonObject?.get("thumbnails")?.jsonArray
-                    ?.lastOrNull()?.jsonObject?.get("url")?.jsonPrimitive?.content
-                bannerUrl = c4["banner"]?.jsonObject?.get("thumbnails")?.jsonArray
-                    ?.lastOrNull()?.jsonObject?.get("url")?.jsonPrimitive?.content
-                subscriberCountText = c4["subscriberCountText"]?.jsonObject
-                    ?.get("simpleText")?.jsonPrimitive?.content
-                videosCountText = c4["videosCountText"]?.jsonObject
-                    ?.get("runs")?.jsonArray
-                    ?.firstOrNull()?.jsonObject?.get("text")?.jsonPrimitive?.content
+            header?.get("c4TabbedHeaderRenderer")?.obj()?.let { c4 ->
+                title = c4["title"]?.obj()?.get("simpleText")?.str()
+                avatarUrl = c4["avatar"]?.largestImageUrl()
+                bannerUrl = c4["banner"]?.largestImageUrl()
+                subscriberCountText = c4["subscriberCountText"]?.obj()?.get("simpleText")?.str()
+                videosCountText = c4["videosCountText"]?.obj()
+                    ?.get("runs").arr()
+                    ?.firstNotNullOfOrNull { it.obj()?.get("text")?.str() }
                 // Legacy headers carry the subscribe state on the subscribe button.
                 if (isSubscribed == null) {
-                    isSubscribed = c4["subscribeButton"]?.jsonObject
-                        ?.get("subscribeButtonRenderer")?.jsonObject
-                        ?.get("subscribed")?.jsonPrimitive?.content
+                    isSubscribed = c4["subscribeButton"]?.obj()
+                        ?.get("subscribeButtonRenderer")?.obj()
+                        ?.get("subscribed")?.str()
                         ?.let { it == "true" }
                 }
             }
 
             metadata?.let { meta ->
                 if (title == null) {
-                    title = meta["title"]?.jsonPrimitive?.content
+                    title = meta["title"]?.str()
                 }
                 if (avatarUrl == null) {
-                    avatarUrl = meta["avatar"]?.jsonObject?.get("thumbnails")?.jsonArray
-                        ?.lastOrNull()?.jsonObject?.get("url")?.jsonPrimitive?.content
+                    avatarUrl = meta["avatar"]?.largestImageUrl()
                 }
             }
             microformat?.let { micro ->
@@ -131,55 +192,56 @@ data class YouTubeChannelPage(
             }
 
             val description = metadata?.get("description")?.let { desc ->
-                desc.jsonPrimitive?.content ?: desc.jsonObject?.get("runs")?.jsonArray
-                    ?.joinToString("") { it.jsonObject.get("text")?.jsonPrimitive?.content.orEmpty() }
-                    ?: desc.toString().takeIf { it.isNotBlank() }
+                desc.str()
+                    ?: desc.obj()?.get("runs").arr()
+                        ?.joinToString("") { it.obj()?.get("text")?.str().orEmpty() }
+                        ?.takeIf { it.isNotBlank() }
             }
 
             // Videos live under either tabRenderer or richGridRenderer.
             val videos = mutableListOf<YouTubeVideoItem>()
             var continuation: String? = null
-            root["contents"]?.jsonObject?.get("twoColumnBrowseResultsRenderer")?.jsonObject
-                ?.get("tabs")?.jsonArray?.forEach { tabEl ->
-                    val tabContent = tabEl.jsonObject["tabRenderer"]?.jsonObject
-                        ?.get("content")?.jsonObject ?: return@forEach
+            root["contents"]?.obj()?.get("twoColumnBrowseResultsRenderer")?.obj()
+                ?.get("tabs").arr().forEach { tabEl ->
+                    val tabContent = tabEl.obj()?.get("tabRenderer")?.obj()
+                        ?.get("content")?.obj() ?: return@forEach
                     // Videos/Live use sectionListRenderer; Shorts uses richGridRenderer.
                     val sections: List<JsonElement> =
-                        tabContent["sectionListRenderer"]?.jsonObject
-                            ?.get("contents")?.jsonArray?.toList()
-                            ?: tabContent["richGridRenderer"]?.jsonObject
-                                ?.get("contents")?.jsonArray?.toList()
-                            ?: emptyList()
+                        tabContent["sectionListRenderer"]?.obj()
+                            ?.get("contents").arr()
+                            .ifEmpty {
+                                tabContent["richGridRenderer"]?.obj()?.get("contents").arr()
+                            }
                     sections.forEach { sectionEl ->
-                        val itemSectionContents = sectionEl.jsonObject["itemSectionRenderer"]
-                            ?.jsonObject?.get("contents")?.jsonArray?.toList()
+                        val itemSectionContents = sectionEl.obj()?.get("itemSectionRenderer")
+                            ?.obj()?.get("contents").arr()
                         val items: List<JsonElement> = when {
-                            itemSectionContents != null -> itemSectionContents
-                            sectionEl.jsonObject["richItemRenderer"] != null ->
-                                listOf(sectionEl)
+                            itemSectionContents.isNotEmpty() -> itemSectionContents
+                            sectionEl.obj()?.get("richItemRenderer") != null -> listOf(sectionEl)
                             else -> emptyList()
                         }
                         items.forEach { itemEl ->
-                            val richContent = itemEl.jsonObject["richItemRenderer"]
-                                ?.jsonObject?.get("content")?.jsonObject
-                            val directVideoRenderer = itemEl.jsonObject["videoRenderer"]?.jsonObject
+                            val richContent = itemEl.obj()?.get("richItemRenderer")
+                                ?.obj()?.get("content")?.obj()
+                            val directVideoRenderer = itemEl.obj()?.get("videoRenderer")?.obj()
                             val item = when {
                                 directVideoRenderer != null -> {
                                     parseVideoRenderer(directVideoRenderer)?.let(videos::add)
                                     null
                                 }
                                 richContent != null -> richContent
-                                else -> itemEl.jsonObject
+                                else -> itemEl.obj()
                             } ?: return@forEach
                             // richItemRenderer content may be a videoRenderer, reelItemRenderer
                             // (Shorts) or the newer lockupViewModel.
-                            val rendered = item["videoRenderer"]?.jsonObject
-                                ?: item["reelItemRenderer"]?.jsonObject
+                            val rendered = item["videoRenderer"]?.obj()
+                                ?: item["reelItemRenderer"]?.obj()
                             if (rendered != null) {
                                 parseVideoRenderer(rendered)?.let(videos::add)
                             } else {
                                 item["lockupViewModel"]?.let { raw ->
-                                    Lockup.parse(raw)
+                                    runCatching { Lockup.parse(raw) }
+                                        ?.getOrNull()
                                         ?.let(Lockup::toVideoItem)
                                         ?.let(videos::add)
                                 }

@@ -94,6 +94,7 @@ import com.auramusic.app.LocalPlayerAwareWindowInsets
 import com.auramusic.app.R
 import com.auramusic.app.constants.VideoFeedGridViewKey
 import com.auramusic.app.ui.component.ChannelAvatarStack
+import com.auramusic.app.ui.component.MarqueeTitle
 import com.auramusic.app.ui.component.ChannelPickerDialog
 import com.auramusic.app.ui.component.rememberVideoChannels
 import com.auramusic.app.ui.component.shimmer.ShimmerHost
@@ -1097,14 +1098,11 @@ internal fun FeedVideoGridCard(
 
         // Inset the text block so the card's rounded corners don't clip the
         // leading digit of the views line (e.g. "2.0M" losing the "2").
-        Text(
+        MarqueeTitle(
             text = video.title,
             style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 8.dp)
+            modifier = Modifier.padding(horizontal = 8.dp),
         )
 
         Row(
@@ -1267,14 +1265,11 @@ internal fun FeedVideoListRow(
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
-                Text(
+                MarqueeTitle(
                     text = video.title,
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f),
                 )
             }
             val compactViews = video.viewCountText?.let { compactViewCount(it) }

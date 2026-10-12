@@ -1044,9 +1044,9 @@ private fun VideoHistoryThumb(
                 ),
             contentAlignment = Alignment.Center,
         ) {
-            if (!entry.thumbnailUrl.isNullOrBlank()) {
+            if (!entry.videoThumbnailUrl.isNullOrBlank()) {
                 AsyncImage(
-                    model = entry.thumbnailUrl,
+                    model = entry.videoThumbnailUrl,
                     contentDescription = entry.title,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop,

@@ -131,8 +131,21 @@ class VideoRecommendationManager(private val context: Context) {
                 title = entry.title,
                 channelName = entry.channelName,
                 channelId = entry.channelId,
+                // History rows used to arrive with no credited channel at all, so the
+                // card showed a bare title with no avatar and no way into the channel.
+                channels = if (entry.channelName.isNotBlank()) {
+                    listOf(
+                        com.auramusic.innertube.models.Artist(
+                            name = entry.channelName,
+                            id = entry.channelId,
+                            avatarUrl = entry.channelAvatarUrl,
+                        ),
+                    )
+                } else {
+                    emptyList()
+                },
                 thumbnails = listOfNotNull(
-                    entry.thumbnailUrl?.let { url ->
+                    entry.videoThumbnailUrl?.let { url ->
                         com.auramusic.innertube.models.Thumbnail(url = url, width = null, height = null)
                     }
                 ),

@@ -85,6 +85,7 @@ import com.auramusic.app.LocalPlayerAwareWindowInsets
 import com.auramusic.app.R
 import com.auramusic.app.constants.VideoRecentSearchesKey
 import com.auramusic.app.ui.component.ChannelAvatarStack
+import com.auramusic.app.ui.component.MarqueeTitle
 import com.auramusic.app.ui.component.ChannelPickerDialog
 import com.auramusic.app.ui.component.rememberVideoChannels
 import com.auramusic.app.constants.VideoSearchGridViewKey
@@ -1225,13 +1226,10 @@ private fun SearchHeroVideoCard(
             }
         }
         Spacer(modifier = Modifier.height(10.dp))
-        Text(
+        MarqueeTitle(
             text = video.title,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
         )
         Spacer(modifier = Modifier.height(4.dp))
         // Views • published at only — the channel name lives in the row below

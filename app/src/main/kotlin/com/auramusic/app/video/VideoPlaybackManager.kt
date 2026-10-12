@@ -92,6 +92,12 @@ object VideoPlaybackManager {
         val channelThumbnail: String? = null,
         val channelAvatarUrl: String? = null,
         /**
+         * The video's own artwork. History rows used to be handed [channelThumbnail]
+         * instead, which is why Continue Watching and the Library shelves showed a
+         * channel avatar (or nothing at all) where a video thumbnail belongs.
+         */
+        val videoThumbnail: String? = null,
+        /**
          * Every channel the video credits. Most videos have one; collaborative and music
          * videos can have two, and [channelId] only ever names the first.
          */
@@ -139,7 +145,19 @@ object VideoPlaybackManager {
         val lastPlayedAt: Long,
         val positionMs: Long = 0,
         val durationMs: Long = 0,
+        val channelAvatarUrl: String? = null,
     ) {
+        /**
+         * Artwork for the row. Entries written before the video thumbnail was recorded
+         * hold the channel avatar here (and some hold nothing at all), which is why
+         * Continue Watching and the Library shelves had cards with the wrong image or
+         * none - so anything that is not video artwork falls back to YouTube's own.
+         */
+        val videoThumbnailUrl: String?
+            get() = thumbnailUrl
+                ?.takeIf { it.isNotBlank() && !it.isChannelAvatarUrl() }
+                ?: VideoThumbnails.highQuality(videoId)
+
         /**
          * How much of the video was actually watched, 0..1. Zero while the duration is
          * still unknown, which is what keeps a just-started video from drawing an empty
@@ -501,6 +519,7 @@ object VideoPlaybackManager {
                 channelName = channelName,
                 channelId = channelId,
                 channelThumbnail = channelThumbnail ?: bestThumbnail,
+                videoThumbnail = bestThumbnail ?: VideoThumbnails.highQuality(videoId),
                 channels = channels.ifEmpty {
                     channelId?.let { listOf(com.auramusic.innertube.models.Artist(channelName, it)) }
                         .orEmpty()
@@ -1253,7 +1272,8 @@ object VideoPlaybackManager {
                         title = session.title,
                         channelName = session.channelName,
                         channelId = session.channelId,
-                        thumbnailUrl = session.channelThumbnail,
+                        thumbnailUrl = session.videoThumbnail,
+                channelAvatarUrl = session.channelAvatarUrl ?: session.channelThumbnail,
                         lastPlayedAt = System.currentTimeMillis(),
                     ),
                 )
@@ -1328,7 +1348,8 @@ object VideoPlaybackManager {
                         title = session.title,
                         channelName = session.channelName,
                         channelId = session.channelId,
-                        thumbnailUrl = session.channelThumbnail,
+                        thumbnailUrl = session.videoThumbnail,
+                channelAvatarUrl = session.channelAvatarUrl ?: session.channelThumbnail,
                         lastPlayedAt = System.currentTimeMillis(),
                     ),
                 )
@@ -1878,7 +1899,8 @@ object VideoPlaybackManager {
                 title = session.title,
                 channelName = session.channelName,
                 channelId = session.channelId,
-                thumbnailUrl = session.channelThumbnail,
+                thumbnailUrl = session.videoThumbnail,
+                channelAvatarUrl = session.channelAvatarUrl ?: session.channelThumbnail,
                 lastPlayedAt = System.currentTimeMillis(),
                 positionMs = _positionState.value.first,
                 durationMs = _positionState.value.second,
@@ -1902,7 +1924,8 @@ object VideoPlaybackManager {
                 title = session.title,
                 channelName = session.channelName,
                 channelId = session.channelId,
-                thumbnailUrl = session.channelThumbnail,
+                thumbnailUrl = session.videoThumbnail,
+                channelAvatarUrl = session.channelAvatarUrl ?: session.channelThumbnail,
                 lastPlayedAt = System.currentTimeMillis(),
                 positionMs = duration,
                 durationMs = duration,
@@ -2030,6 +2053,15 @@ object VideoPlaybackManager {
 private const val MAX_VIDEO_HISTORY_ENTRIES = 100
 
 /**
+ * Channel avatars are served from these hosts. Used to tell an artwork URL that is
+ * actually a channel avatar apart from a real video thumbnail.
+ */
+private fun String.isChannelAvatarUrl(): Boolean =
+    contains("yt3.googleusercontent.com") ||
+        contains("yt3.ggpht.com") ||
+        contains("ytimg.com/a/")
+
+/**
  * Watch fractions shared by every surface that draws a watch bar or decides whether a
  * video resumes: below [RESUME_MIN_PROGRESS] a tap is a fresh start (the user only nudged
  * the playhead), at or above [WATCHED_PROGRESS] the video counts as watched.
@@ -2062,6 +2094,7 @@ private fun parseVideoHistory(json: String?): List<VideoPlaybackManager.VideoHis
                     lastPlayedAt = obj.optLong("ts"),
                     positionMs = obj.optLong("pos"),
                     durationMs = obj.optLong("dur"),
+                    channelAvatarUrl = obj.optString("ca").takeIf { it.isNotEmpty() },
                 )
             )
         }
@@ -2084,6 +2117,7 @@ private fun buildVideoHistoryJson(entries: List<VideoPlaybackManager.VideoHistor
                 put("ts", entry.lastPlayedAt)
                 put("pos", entry.positionMs)
                 put("dur", entry.durationMs)
+                put("ca", entry.channelAvatarUrl ?: "")
             }
         )
     }
