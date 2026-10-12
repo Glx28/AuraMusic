@@ -30,6 +30,18 @@ object DiscordExternalAssets {
         }
     }
 
+    /**
+     * Already-uploaded asset for [imageUrl], without touching the network.
+     *
+     * Presence updates need this on the spot: sending without the artwork and upgrading
+     * it a moment later is exactly the flicker this avoids.
+     */
+    fun cached(imageUrl: String): String? {
+        if (imageUrl.isBlank()) return null
+        if (imageUrl.startsWith("mp:")) return imageUrl
+        return cache[imageUrl]
+    }
+
     suspend fun resolve(
         imageUrl: String,
         appId: String,

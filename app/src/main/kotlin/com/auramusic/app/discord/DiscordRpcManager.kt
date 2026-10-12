@@ -426,12 +426,28 @@ object DiscordRpcManager {
                 add(activity.button2Label to activity.button2Url)
             }
         }
+        // Artwork that has already been uploaded once is looked up synchronously and
+        // goes out with this very update. Resolving it asynchronously instead meant every
+        // presence started life without an image and gained one a moment later, which is
+        // what Discord rendered as a flicker - the thumbnail vanished and came back on
+        // every state change.
+        val cachedLarge = activity.largeImage
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { DiscordExternalAssets.cached(it) }
+        val cachedSmall = activity.smallImage
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { DiscordExternalAssets.cached(it) }
+
         val payloadNoImages = DiscordPresence.buildActivity(
             name = activity.name.orEmpty(),
             type = activityTypeToEnum(activity.activityType),
             statusDisplayType = statusDisplayType,
             details = activity.details,
             state = activity.state,
+            largeImage = cachedLarge,
+            largeText = activity.largeText,
+            smallImage = cachedSmall,
+            smallText = activity.smallText,
             startMs = activity.startTimestamp.takeIf { it > 0L },
             endMs = activity.endTimestamp?.takeIf { it > 0L },
             buttons = buttons,
@@ -452,6 +468,12 @@ object DiscordRpcManager {
         } catch (e: Throwable) {
             Timber.tag(TAG).e(e, "setActivity: send failed")
         }
+
+        // Both images already went out with the payload above: there is nothing left to
+        // resolve and a second identical update would only make Discord redraw.
+        if (cachedLarge != null && cachedSmall != null) return
+        if (cachedLarge != null && activity.smallImage.isNullOrEmpty()) return
+        if (cachedSmall != null && activity.largeImage.isNullOrEmpty()) return
 
         imageResolutionJob?.cancel()
 

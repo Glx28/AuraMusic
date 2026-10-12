@@ -25,6 +25,7 @@ import android.media.audiofx.LoudnessEnhancer
 import android.net.ConnectivityManager
 import android.os.Binder
 import android.os.Build
+import android.os.Looper
 import android.os.Bundle
 import androidx.core.app.NotificationCompat
 import androidx.core.content.getSystemService
@@ -57,6 +58,7 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.PlayerMessage
 import androidx.media3.exoplayer.LoadControl
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
@@ -339,6 +341,15 @@ class MusicService :
     private var automixBlendPercent = 90f
     
     private var automixTriggerJob: Job? = null
+    /**
+     * The blend trigger, held as a player message rather than a timer.
+     *
+     * A coroutine delay counts wall-clock time: pause the song for half a minute and
+     * it keeps running, so the blend fires in the middle of the next song and the
+     * track appears to skip itself. A message positioned on the player's own clock
+     * only arrives when playback actually reaches it, and follows seeks and pauses.
+     */
+    private var automixTriggerMessage: PlayerMessage? = null
 
     /** Builds and prepares the secondary player ahead of the blend. */
     private var automixWarmupJob: Job? = null
@@ -2909,6 +2920,18 @@ class MusicService :
         }
     }
 
+    /**
+     * A cache file that has gone missing underneath the player. Recoverable by resolving
+     * the stream again - treating it as a broken song skipped a track that plays fine.
+     */
+    private fun isFileNotFoundError(error: PlaybackException): Boolean =
+        error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND ||
+            (error.cause as? PlaybackException)?.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND
+
+    /** Cast and other remote-playback errors: the stream URL has to be resolved again. */
+    private fun isRemotePlaybackError(error: PlaybackException): Boolean =
+        error.errorCode == PlaybackException.ERROR_CODE_REMOTE_ERROR
+
     private fun isNetworkRelatedError(error: PlaybackException): Boolean {
         // Don't treat specific errors as network errors - they need special handling
         if (isExpiredUrlError(error) || isRangeNotSatisfiableError(error) || isPageReloadError(error)) {
@@ -3033,6 +3056,14 @@ class MusicService :
             }
         }
         
+        // A cache file that vanished and a remote/cast error both mean the resolved
+        // stream is stale rather than the song being broken: re-resolve and carry on.
+        if (isFileNotFoundError(error) || isRemotePlaybackError(error)) {
+            Timber.tag(TAG).d("Stale stream error (%s), refreshing stream URL", error.errorCode)
+            handleExpiredUrlError(mediaId)
+            return
+        }
+
         // PARSING CONTAINER MALFORMED usually means the stream URL served non-media
         // bytes (expired/invalid URL, bot-check page) rather than a genuinely corrupt
         // file. Re-resolve the URL once with fresh tokens instead of stopping.
@@ -3877,6 +3908,8 @@ class MusicService :
         playerInitialized.value = false
         _playerFlow.value = null
         automixTriggerJob?.cancel()
+        automixTriggerMessage?.cancel()
+        automixTriggerMessage = null
         automixWarmupJob?.cancel()
         automixDeadlineJob?.cancel()
         automixJob?.cancel()
@@ -4788,6 +4821,8 @@ class MusicService :
     private fun scheduleAutomix() {
         automixTriggerJob?.cancel()
         automixTriggerJob = null
+        automixTriggerMessage?.cancel()
+        automixTriggerMessage = null
         automixWarmupJob?.cancel()
         automixWarmupJob = null
         if (!automixEnabled) return
@@ -4861,11 +4896,18 @@ class MusicService :
             }
         }
 
-        automixTriggerJob = scope.launch {
-            delay(triggerDelayMs)
-            if (isActive && player.isPlaying && player.currentMediaItem?.mediaId == targetMediaId) {
+        // Armed on the player's clock rather than on a timer: the message is delivered
+        // when playback actually reaches the trigger, so pausing, seeking and a stalled
+        // buffer all move it instead of letting it fire at the wrong moment mid-song.
+        automixTriggerMessage = player.createMessage { _, _ ->
+            if (player.isPlaying && player.currentMediaItem?.mediaId == targetMediaId && automixEnabled) {
                 startAutomix()
             }
+            automixTriggerMessage = null
+        }.apply {
+            setLooper(Looper.getMainLooper())
+            setPosition(triggerTime)
+            send()
         }
     }
 
@@ -5251,6 +5293,12 @@ class MusicService :
 
         // Publish only after the service, session, and listeners agree on the active player.
         _playerFlow.value = nextPlayer
+
+        // The incoming track was already playing on the secondary player while this
+        // service was not attached to it, so its real transition never reached here.
+        // Re-fired now that the swap is done, otherwise the track it just started is
+        // missing its metadata, scrobble and stream-recovery work.
+        onMediaItemTransition(nextPlayer.currentMediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_AUTO)
         
 automixDeadlineJob?.cancel()
          automixDeadlineJob = null
