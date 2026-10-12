@@ -40,6 +40,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.pullToRefresh
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -109,6 +110,7 @@ fun ChannelScreen(
     var header by remember { mutableStateOf<ChannelHeader?>(null) }
     var videos by remember(channelId) { mutableStateOf<List<YouTubeVideoItem>>(emptyList()) }
     var channelListView by remember { mutableStateOf(false) }
+    var subscribeError by remember { mutableStateOf<String?>(null) }
     var continuation by remember(channelId) { mutableStateOf<String?>(null) }
     var posts by remember(channelId) { mutableStateOf<List<YouTubeChannelPost>>(emptyList()) }
     var postsContinuation by remember(channelId) { mutableStateOf<String?>(null) }
@@ -282,10 +284,14 @@ fun ChannelScreen(
     fun toggleSubscribe() {
         if (isSubscribing) return
         val newSubscribed = !isSubscribed
+        val previous = isSubscribed
+        // Flipped immediately: the control used to wait for the round-trip and simply
+        // never changed when it failed - a signed-out tap looked like a dead button.
+        isSubscribed = newSubscribed
         isSubscribing = true
         scope.launch {
-            // Keep a local record of the subscription so the Library's channel
-            // list reflects it even before the remote state round-trips.
+            // Recorded locally either way, so the Library's channel list and the video
+            // overlay agree with this screen immediately.
             VideoPlaybackManager.persistChannelSubscription(
                 context = context,
                 channelId = resolvedChannelId,
@@ -293,8 +299,25 @@ fun ChannelScreen(
                 avatarUrl = header?.avatarUrl,
                 subscribe = newSubscribed,
             )
-            YouTube.subscribeChannel(resolvedChannelId, newSubscribed).onSuccess {
-                isSubscribed = newSubscribed
+            VideoPlaybackManager.markChannelSubscribed(resolvedChannelId, newSubscribed)
+            val result = YouTube.subscribeChannel(resolvedChannelId, newSubscribed)
+            if (result.isFailure) {
+                // Put it back and say why, rather than leaving a state that never
+                // reached the account.
+                isSubscribed = previous
+                VideoPlaybackManager.persistChannelSubscription(
+                    context = context,
+                    channelId = resolvedChannelId,
+                    name = header?.title.orEmpty(),
+                    avatarUrl = header?.avatarUrl,
+                    subscribe = previous,
+                )
+                VideoPlaybackManager.markChannelSubscribed(resolvedChannelId, previous)
+                subscribeError = if (!YouTube.isLoggedIn()) {
+                    context.getString(R.string.subscribe_needs_account)
+                } else {
+                    result.exceptionOrNull()?.message ?: context.getString(R.string.subscribe_failed)
+                }
             }
             isSubscribing = false
         }
@@ -302,6 +325,25 @@ fun ChannelScreen(
 
     LaunchedEffect(channelId, selectedTab, channelReloadKey) {
         loadFirstPage(ChannelTab.entries[selectedTab])
+    }
+
+    // Seeded from storage and then kept in step with the shared set, so a channel
+    // subscribed from the video overlay already reads as subscribed here.
+    LaunchedEffect(Unit) {
+        VideoPlaybackManager.primeSubscribedChannels(context)
+    }
+    val sharedSubscriptions by VideoPlaybackManager.subscribedChannelIds.collectAsState()
+    LaunchedEffect(sharedSubscriptions, resolvedChannelId) {
+        if (resolvedChannelId.isNotBlank() && sharedSubscriptions.contains(resolvedChannelId)) {
+            isSubscribed = true
+        }
+    }
+
+    subscribeError?.let { message ->
+        LaunchedEffect(message) {
+            kotlinx.coroutines.delay(4_000)
+            subscribeError = null
+        }
     }
 
     LaunchedEffect(isLoading) {
@@ -346,6 +388,7 @@ fun ChannelScreen(
                 isLoading = isLoading,
                 isSubscribed = isSubscribed,
                 isSubscribing = isSubscribing,
+                subscribeError = subscribeError,
                 onSubscribeClick = { toggleSubscribe() },
             )
         }
@@ -553,6 +596,7 @@ private fun ChannelHeaderSection(
     isLoading: Boolean,
     isSubscribed: Boolean,
     isSubscribing: Boolean,
+    subscribeError: String?,
     onSubscribeClick: () -> Unit,
 ) {
     Column {
@@ -729,6 +773,16 @@ private fun ChannelHeaderSection(
                         else MaterialTheme.colorScheme.onPrimary,
                     )
                 }
+            }
+            // A rejected subscribe used to look like a dead button: nothing moved and
+            // nothing was said. This names the reason instead.
+            subscribeError?.let { message ->
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                )
             }
         }
     }

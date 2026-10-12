@@ -109,6 +109,7 @@ import com.auramusic.app.constants.VideoFeedGridViewKey
 import com.auramusic.app.ui.component.ChannelAvatarStack
 import com.auramusic.app.ui.component.MarqueeTitle
 import com.auramusic.app.ui.component.ChannelPickerDialog
+import com.auramusic.app.ui.component.prefetchVideoChannels
 import com.auramusic.app.ui.component.rememberVideoChannels
 import com.auramusic.app.ui.component.shimmer.ShimmerHost
 import com.auramusic.app.utils.compactViewCount
@@ -320,6 +321,28 @@ fun VideosScreen(
         loadFirstPage()
     }
 
+    // Warm the collaborations for the rows about to be drawn. Resolving them lazily
+    // meant a card first drew a single avatar and then swapped to two, and a tap in
+    // between opened the channel page instead of offering the choice.
+    LaunchedEffect(feed) {
+        if (feed.isEmpty()) return@LaunchedEffect
+        prefetchVideoChannels(
+            videos = feed.take(24).map { it.videoId to it.channelName },
+            scope = scope,
+        )
+    }
+
+    // The same for the personalised sections above them.
+    LaunchedEffect(personalSections) {
+        prefetchVideoChannels(
+            videos = personalSections
+                .flatMap { section -> section.videos }
+                .take(16)
+                .map { it.videoId to it.channelName },
+            scope = scope,
+        )
+    }
+
     // Auto-refresh the feed on return: when the screen resumes (app foregrounded,
     // or the user navigates back from search / a channel / the video player),
     // silently reload the first page if we're not already loading.
@@ -411,25 +434,6 @@ fun VideosScreen(
                 ),
             contentAlignment = Alignment.TopStart
         ) {
-            // Refresh indicator, styled like Home's. It is drawn after the content so it
-            // is never hidden behind the first rows, and it takes part in the layout
-            // rather than floating over them - a spinner you cannot see is the same as
-            // no spinner at all when the list has not scrolled away.
-            androidx.compose.animation.AnimatedVisibility(
-                visible = isRefreshing && !isLoading,
-                enter = androidx.compose.animation.fadeIn(),
-                exit = androidx.compose.animation.fadeOut(),
-                modifier = Modifier.align(Alignment.TopCenter),
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    shadowElevation = 3.dp,
-                    modifier = Modifier.padding(top = 8.dp),
-                ) {
-                    ContainedLoadingIndicator(modifier = Modifier.padding(6.dp))
-                }
-            }
             when {
                 isLoading -> SkeletonFeed(columns = columns, gridView = gridView)
                 error != null && feed.isEmpty() -> {
@@ -657,6 +661,25 @@ else -> {
                             }
                         }
                     }
+                }
+            }
+
+            // Drawn last, on purpose: inside this container the sections and the feed
+            // are laid out on top of anything declared before them, so a spinner placed
+            // up here sat behind Continue Watching and never showed at all.
+            androidx.compose.animation.AnimatedVisibility(
+                visible = isRefreshing && !isLoading,
+                enter = androidx.compose.animation.fadeIn(),
+                exit = androidx.compose.animation.fadeOut(),
+                modifier = Modifier.align(Alignment.TopCenter),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    shadowElevation = 3.dp,
+                    modifier = Modifier.padding(top = 10.dp),
+                ) {
+                    ContainedLoadingIndicator(modifier = Modifier.padding(6.dp))
                 }
             }
         }

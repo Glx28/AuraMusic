@@ -309,6 +309,66 @@ object VideoPlaybackManager {
      * lands.
      */
     private val avatarByChannelRef = ConcurrentHashMap<String, String>()
+
+    /**
+     * Channels subscribed in this session, by id.
+     *
+     * The channel screen and the video overlay both show a subscribe control for the same
+     * channel, and each used to answer from its own page load - so subscribing in one
+     * left the other showing the old state until it happened to reload. One shared set
+     * keeps them in step the moment either one is tapped.
+     */
+    val subscribedChannelIds: MutableStateFlow<Set<String>> = MutableStateFlow(emptySet())
+
+    /**
+     * Video ids liked so far in this session.
+     *
+     * A like is the user's own decision and lives on the device; the watch page is only
+     * asked afterwards, and says nothing when the account is signed out. Reading the
+     * like off that page alone is why a video replayed after being liked showed up
+     * unliked again - and why the overlay's button could flicker between states.
+     */
+    private val likedVideoIds: MutableStateFlow<Set<String>> = MutableStateFlow(emptySet())
+
+    fun isVideoLiked(videoId: String): Boolean = likedVideoIds.value.contains(videoId)
+
+    private fun markVideoLiked(videoId: String, liked: Boolean) {
+        likedVideoIds.value = likedVideoIds.value.let {
+            if (liked) it + videoId else it - videoId
+        }
+    }
+
+    /** Loads the stored likes once per process so replayed videos read as liked. */
+    suspend fun primeLikedVideos(context: Context) {
+        val stored = runCatching { parseVideoHistory(context.dataStore[LikedVideosKey]) }
+            .getOrDefault(emptyList())
+            .map { it.videoId }
+            .toSet()
+        likedVideoIds.value = stored
+    }
+
+    /** True when [channelId] is subscribed as far as this process knows. */
+    fun isChannelSubscribed(channelId: String?): Boolean =
+        channelId != null && subscribedChannelIds.value.contains(channelId)
+
+    /** Records (or forgets) a subscription in the shared set. */
+    fun markChannelSubscribed(channelId: String, subscribed: Boolean) {
+        subscribedChannelIds.value = subscribedChannelIds.value.let {
+            if (subscribed) it + channelId else it - channelId
+        }
+    }
+
+    /**
+     * Seeds the shared set from what is already stored, so a channel subscribed in a
+     * previous session reads as subscribed before any page has loaded.
+     */
+    suspend fun primeSubscribedChannels(context: Context) {
+        val stored = runCatching { parseSubscribedChannels(context.dataStore[VideoSubscribedChannelsKey]) }
+            .getOrDefault(emptyList())
+            .map { it.channelId }
+            .toSet()
+        subscribedChannelIds.value = stored
+    }
     /**
      * Application context only. This used to hold the Activity, which leaked it for
      * the life of the process (it was never cleared, and was set before the
@@ -434,7 +494,7 @@ object VideoPlaybackManager {
                     recommendationsContinuation = null,
                     isLoadingRecommendations = false,
                     isLoadingMoreRecommendations = false,
-                    isLiked = false,
+                    isLiked = newVideoId?.let { id -> isVideoLiked(id) } ?: false,
                     isDisliked = false,
                     isSubscribed = false,
                     isSaved = false,
@@ -547,6 +607,11 @@ object VideoPlaybackManager {
             // and go straight to writing final results, cutting two extra recompositions per load.
             isLoadingRecommendations = true,
             isLoadingComments = true,
+            // A like is the user's own decision and is recorded on this device. Seeding it
+            // here means a replayed video shows as liked straight away; the watch page that
+            // loads afterwards can only confirm it, never take it back.
+            isLiked = isVideoLiked(videoId),
+            isSubscribed = isChannelSubscribed(channelId),
         )
         // Rebuild the media notification immediately with the NEW video's metadata.
         // This closes the window where the shade would otherwise keep showing the
@@ -661,7 +726,9 @@ object VideoPlaybackManager {
                     commentCountText = session.commentCountText ?: metadata.commentCountText(),
                     likeCountText = session.likeCountText ?: metadata.likeCountText(),
                 ),
-                isLiked = likeState == WatchLikeState.LIKE,
+                // The remote page cannot un-like anything it never saw, so a locally
+                // recorded like is kept rather than being reset on every load.
+                isLiked = likeState == WatchLikeState.LIKE || isVideoLiked(videoId),
                 isDisliked = likeState == WatchLikeState.DISLIKE,
                 isSaved = videoId in savedIds,
             )
@@ -741,7 +808,7 @@ object VideoPlaybackManager {
                 ),
                 positionMs = 0,
                 error = null,
-                isLiked = false,
+                isLiked = isVideoLiked(item.videoId),
                 isDisliked = false,
                 isSubscribed = false,
                 isSaved = false,
@@ -1279,6 +1346,7 @@ object VideoPlaybackManager {
                 )
             }
             ctx.dataStore.edit { it[LikedVideosKey] = buildVideoHistoryJson(current.take(MAX_VIDEO_HISTORY_ENTRIES)) }
+            markVideoLiked(session.videoId, liked)
         }
     }
 
@@ -1299,21 +1367,55 @@ object VideoPlaybackManager {
         }
     }
 
-    fun toggleSubscribe() {
+    /**
+     * Subscribes to (or unsubscribes from) a channel credited on the current video.
+     *
+     * [channelId] picks a specific credited channel - a collaboration credits two, and
+     * each has to be followed in its own right. Flipped before the request goes out and
+     * put back if it is rejected, because a control that only moves on success reads as
+     * a dead button when the account cannot be reached.
+     */
+    fun toggleSubscribe(channelId: String? = null) {
         val session = _uiState.value.session ?: return
-        val channelId = session.channelId ?: return
-        val newSubscribed = !_uiState.value.isSubscribed
-        scope.launch {
-            persistChannelSubscription(
-                channelId = channelId,
-                name = session.channelName,
-                avatarUrl = session.channelAvatarUrl ?: session.channelThumbnail,
-                subscribe = newSubscribed,
-            )
-            YouTube.subscribeChannel(channelId, newSubscribed)
+        val target = channelId ?: session.channelId ?: return
+        val credited = session.channels.firstOrNull { it.id == target }
+        val current = if (target == session.channelId) {
+            _uiState.value.isSubscribed
+        } else {
+            isChannelSubscribed(target)
+        }
+        val newSubscribed = !current
+
+        if (target == session.channelId) {
             _uiState.update { it.copy(isSubscribed = newSubscribed) }
         }
+        markChannelSubscribed(target, newSubscribed)
+        scope.launch {
+            persistChannelSubscription(
+                channelId = target,
+                name = credited?.name ?: session.channelName,
+                avatarUrl = credited?.avatarUrl ?: session.channelAvatarUrl ?: session.channelThumbnail,
+                subscribe = newSubscribed,
+            )
+            val result = YouTube.subscribeChannel(target, newSubscribed)
+            if (result.isFailure) {
+                markChannelSubscribed(target, current)
+                if (target == session.channelId) {
+                    _uiState.update { it.copy(isSubscribed = current) }
+                }
+                persistChannelSubscription(
+                    channelId = target,
+                    name = credited?.name ?: session.channelName,
+                    avatarUrl = credited?.avatarUrl ?: session.channelAvatarUrl ?: session.channelThumbnail,
+                    subscribe = current,
+                )
+                subscribeErrorMessage = result.exceptionOrNull()?.message
+            }
+        }
     }
+
+    /** Why the last subscribe attempt failed, if it did. */
+    @Volatile var subscribeErrorMessage: String? = null
 
     fun toggleSave() {
         val session = _uiState.value.session ?: return

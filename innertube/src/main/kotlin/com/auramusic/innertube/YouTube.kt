@@ -162,6 +162,16 @@ object YouTube {
         set(value) {
             innerTube.cookie = value
         }
+    /**
+     * Whether anything is signed in at all.
+     *
+     * Subscribe and like calls need an account: without one they are rejected, and
+     * without this the caller can only report a generic failure for what is really "you
+     * are not signed in".
+     */
+    fun isLoggedIn(): Boolean =
+        !oauthToken.isNullOrBlank() || cookie.orEmpty().contains("SAPISID")
+
     var oauthToken: String?
         get() = innerTube.oauthToken
         set(value) {

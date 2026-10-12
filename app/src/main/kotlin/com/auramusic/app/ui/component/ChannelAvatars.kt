@@ -12,7 +12,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -171,14 +175,45 @@ fun rememberVideoChannels(
     baseChannels: List<Artist>,
     channelName: String,
 ): List<Artist> {
-    var resolved by remember(videoId, baseChannels) { mutableStateOf<List<Artist>?>(null) }
-    LaunchedEffect(videoId, baseChannels, channelName) {
-        if (videoId.isBlank() || baseChannels.size > 1 || !channelName.hasCollaborationByline()) {
-            return@LaunchedEffect
-        }
-        resolved = CollaboratorResolver.resolve(videoId).takeIf { it.size > 1 }
+    if (baseChannels.size > 1) return baseChannels
+
+    // Results are published process-wide, so a collaboration looked up for one card
+    // repaints every other card showing the same video instead of each one resolving
+    // on its own - and the same answer survives navigating away and back.
+    val resolvedByVideo by resolvedChannels.collectAsState()
+    val alreadyResolved = resolvedByVideo[videoId]
+    LaunchedEffect(videoId, channelName) {
+        if (videoId.isBlank() || !channelName.hasCollaborationByline()) return@LaunchedEffect
+        CollaboratorResolver.resolve(videoId).takeIf { it.size > 1 }?.let { publishResolvedChannels(videoId, it) }
     }
-    return resolved ?: baseChannels
+    return alreadyResolved ?: baseChannels
+}
+
+/**
+ * Resolved collaborations, by video id. Shared so a lookup that happens anywhere - a
+ * card, the player, a prefetch - is visible everywhere at once.
+ */
+private val resolvedChannels = MutableStateFlow<Map<String, List<Artist>>>(emptyMap())
+
+private fun publishResolvedChannels(videoId: String, channels: List<Artist>) {
+    resolvedChannels.value = resolvedChannels.value + (videoId to channels)
+}
+
+/**
+ * Looks collaborations up ahead of time for rows the user is about to see.
+ *
+ * Without this a collaboration card draws a single avatar and then swaps to two a moment
+ * later, and a tap in between opens the wrong thing - the stack only shows one, so the
+ * tap navigates instead of offering the choice.
+ */
+fun prefetchVideoChannels(videos: List<Pair<String, String>>, scope: CoroutineScope) {
+    videos.forEach { (videoId, channelName) ->
+        if (videoId.isBlank() || !channelName.hasCollaborationByline()) return@forEach
+        if (resolvedChannels.value.containsKey(videoId)) return@forEach
+        scope.launch {
+            CollaboratorResolver.resolve(videoId).takeIf { it.size > 1 }?.let { publishResolvedChannels(videoId, it) }
+        }
+    }
 }
 
 /** Byline shapes that credit more than one channel: "A & B", "A x B", "A feat. B". */

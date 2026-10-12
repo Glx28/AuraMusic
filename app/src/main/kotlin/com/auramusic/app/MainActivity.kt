@@ -273,6 +273,13 @@ class MainActivity : ComponentActivity() {
                     listenTogetherManager.setPlayerConnection(playerConnection)
                     // The video side shares this player instead of owning one.
                     VideoPlaybackManager.attachSharedPlayer(playerConnection!!)
+                    // Read once at start what this device has liked and subscribed to, so
+                    // a replayed video reads as liked and a subscribed channel reads as
+                    // subscribed before any page has finished loading.
+                    lifecycleScope.launch {
+                        VideoPlaybackManager.primeLikedVideos(this@MainActivity)
+                        VideoPlaybackManager.primeSubscribedChannels(this@MainActivity)
+                    }
                 } catch (e: Exception) {
                     Timber.tag("MainActivity").e(e, "Failed to create PlayerConnection")
                     // Retry after a delay of 500ms

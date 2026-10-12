@@ -74,6 +74,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -1488,10 +1489,14 @@ private fun VideoInfoSection(
 
         Spacer(modifier = Modifier.height(12.dp))
 
+        val subscribedChannelIds by VideoPlaybackManager.subscribedChannelIds.collectAsState()
         ChannelRow(
             session = session,
-            isSubscribed = uiState.isSubscribed,
+            isSubscribed = uiState.isSubscribed ||
+                VideoPlaybackManager.isChannelSubscribed(session.channelId),
+            subscribedChannelIds = subscribedChannelIds,
             onSubscribeClick = { VideoPlaybackManager.toggleSubscribe() },
+            onToggleChannelSubscribe = { channelId -> VideoPlaybackManager.toggleSubscribe(channelId) },
             onChannelClick = onChannelClick,
         )
 
@@ -1668,7 +1673,9 @@ private fun CompactActionChip(
 private fun ChannelRow(
     session: VideoPlaybackManager.VideoSession,
     isSubscribed: Boolean,
+    subscribedChannelIds: Set<String>,
     onSubscribeClick: () -> Unit,
+    onToggleChannelSubscribe: (String) -> Unit,
     onChannelClick: (String) -> Unit,
 ) {
     Row(
@@ -1676,6 +1683,7 @@ private fun ChannelRow(
         modifier = Modifier.fillMaxWidth()
     ) {
         var showChannelPicker by remember { mutableStateOf(false) }
+        var showSubscribePicker by remember { mutableStateOf(false) }
         // Videos that credit two channels open a chooser instead of silently navigating
         // to the first one.
         val openChannel: () -> Unit = {
@@ -1728,8 +1736,25 @@ private fun ChannelRow(
             )
         }
 
+        if (showSubscribePicker) {
+            ChannelPickerDialog(
+                channels = session.channels,
+                onDismiss = { showSubscribePicker = false },
+                onSelect = { showSubscribePicker = false },
+                primaryThumbnailUrl = session.channelAvatarUrl,
+                subscribedChannelIds = subscribedChannelIds,
+                onToggleSubscribe = { channel ->
+                    channel.id?.let(onToggleChannelSubscribe)
+                },
+            )
+        }
+
         Surface(
-            onClick = onSubscribeClick,
+            // Two credited channels means two separate subscriptions, so the button asks
+            // which one rather than silently following whichever happens to be first.
+            onClick = {
+                if (session.channels.size > 1) showSubscribePicker = true else onSubscribeClick()
+            },
             shape = RoundedCornerShape(22.dp),
             color = if (isSubscribed) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.primary,
             modifier = Modifier.height(38.dp)
