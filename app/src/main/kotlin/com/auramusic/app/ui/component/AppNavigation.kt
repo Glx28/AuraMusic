@@ -16,8 +16,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.remember
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -50,16 +52,20 @@ fun AppNavigationRail(
 ) {
     val containerColor = if (pureBlack) Color.Black else MaterialTheme.colorScheme.surfaceContainer
     
-    // Centred vertically: left to itself the rail's content sits against the top of the
-    // window, which put the navigation in the corner instead of halfway down the side.
-    Box(
-        modifier = modifier.fillMaxHeight(),
-        contentAlignment = Alignment.Center,
-    ) {
+    // The rail stacks its items from the top, which put the navigation in the corner
+    // instead of halfway down the side. Centring is done here rather than left to the
+    // rail, because the rail gives no way to say so.
     NavigationRail(
-        modifier = Modifier.fillMaxHeight(),
-        containerColor = containerColor
+        modifier = modifier.fillMaxHeight(),
+        containerColor = containerColor,
     ) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
         navigationItems.forEach { screen ->
             val isSelected = remember(currentRoute, screen.route) {
                 isRouteSelected(currentRoute, screen.route, navigationItems)
@@ -79,7 +85,7 @@ fun AppNavigationRail(
                 }
             )
         }
-    }
+        }
     }
 }
 

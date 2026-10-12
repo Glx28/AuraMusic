@@ -1,3 +1,8 @@
+@file:OptIn(
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+    androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class,
+)
+
 /**
  * Auramusic Project (C) 2026
  * Licensed under GPL-3.0 | See git history for contributors
@@ -58,11 +63,10 @@ import androidx.compose.material.icons.filled.Subscriptions
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ContainedLoadingIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -362,22 +366,21 @@ fun VideosScreen(
                 ),
             contentAlignment = Alignment.TopStart
         ) {
-            // Refresh progress indicator at the top of the feed
+            // Refresh indicator, styled like Home's: a contained spinner rather than a
+            // bare line across the top of the feed.
             Column(modifier = Modifier.fillMaxWidth()) {
                 AnimatedVisibility(
                     visible = isRefreshing && !isLoading,
                     enter = androidx.compose.animation.fadeIn(),
-                    exit = androidx.compose.animation.fadeOut()
+                    exit = androidx.compose.animation.fadeOut(),
                 ) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 8.dp),
-                        contentAlignment = Alignment.Center
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        LinearProgressIndicator(
-                            modifier = Modifier.height(3.dp)
-                        )
+                        ContainedLoadingIndicator()
                     }
                 }
             }
@@ -424,7 +427,8 @@ else -> {
                      val openChannel: (String) -> Unit = { channelId ->
                          navController.navigate("youtube_channel/$channelId?ts=${System.currentTimeMillis()}")
                      }
-                    // Personalized sections integrated at the top of the Music feed
+
+                    // Personalised sections integrated at the top of the Music feed
                     if (personalSections.isNotEmpty() && !isLoadingPersonal) {
                         if (gridView) {
                             LazyVerticalGrid(
@@ -433,12 +437,25 @@ else -> {
                                 modifier = Modifier.fillMaxSize(),
                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                             ) {
+                                // While the sections build there is nothing else worth
+                                // showing, so Home's contained spinner stands in.
+                                if (personalSections.isEmpty() && isLoadingPersonal) {
+                                    item(
+                                        key = "sections_loading",
+                                        span = { GridItemSpan(maxLineSpan) },
+                                    ) {
+                                        SectionsLoadingPlaceholder()
+                                    }
+                                }
                                 personalSections.forEachIndexed { sectionIndex, section ->
                                     item(
                                         key = "section_${sectionIndex}_${section.title}",
                                         span = { GridItemSpan(maxLineSpan) }
                                     ) {
-                                        SectionHeader(title = section.title)
+                                        SectionHeader(
+                                            title = section.title,
+                                            count = section.videos.size,
+                                        )
                                     }
                                     items(
                                         items = section.videos,
@@ -491,9 +508,17 @@ else -> {
                                 modifier = Modifier.fillMaxSize(),
                                 contentPadding = PaddingValues(vertical = 4.dp)
                             ) {
+                                if (personalSections.isEmpty() && isLoadingPersonal) {
+                                    item(key = "sections_loading") {
+                                        SectionsLoadingPlaceholder()
+                                    }
+                                }
                                 personalSections.forEachIndexed { sectionIndex, section ->
                                     item(key = "section_${sectionIndex}_${section.title}") {
-                                        SectionHeader(title = section.title)
+                                        SectionHeader(
+                                            title = section.title,
+                                            count = section.videos.size,
+                                        )
                                     }
                                     items(
                                         items = section.videos,
@@ -755,6 +780,7 @@ private fun SkeletonFeed(columns: Int, gridView: Boolean) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun GridListFooter(
     isLoadingMore: Boolean,
@@ -763,7 +789,22 @@ private fun GridListFooter(
     gridView: Boolean,
 ) {
     when {
-        isLoadingMore -> LoadMoreShimmer(columns = columns, gridView = gridView)
+        // Skeleton tiles plus the same contained spinner Home shows, so it is obvious
+        // the next page is on its way and not that the feed simply ended.
+        isLoadingMore -> Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            LoadMoreShimmer(columns = columns, gridView = gridView)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 16.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                ContainedLoadingIndicator()
+            }
+        }
         hasMore -> Unit
         else -> Box(
             modifier = Modifier
@@ -878,40 +919,73 @@ private fun LoadMoreShimmer(columns: Int, gridView: Boolean) {
  * headings with no cue about which is which. Each known section gets its own Material
  * icon; an unrecognised title simply renders without one rather than guessing.
  */
+/**
+ * Section heading, styled like the Home screen's cards.
+ *
+ * A heading in a tinted block with the icon sitting in its own rounded plate reads as
+ * part of the content instead of a label stuck on top of it, and gives each section a
+ * visible edge - which is what was missing when the sections ran together as one long
+ * undifferentiated scroll.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SectionHeader(title: String, modifier: Modifier = Modifier) {
+private fun SectionsLoadingPlaceholder() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 28.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        ContainedLoadingIndicator()
+    }
+}
+
+@Composable
+private fun SectionHeader(title: String, count: Int? = null, modifier: Modifier = Modifier) {
     val icon = sectionIconFor(title)
-    Column(modifier = modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                // Air above and below the rule: the sections ran into each other, so
-                // scrolling produced one continuous wall of rows with nothing marking
-                // where one ended and the next began.
-                .padding(start = 16.dp, end = 16.dp, top = 18.dp, bottom = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (icon != null) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (icon != null) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(13.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center,
+            ) {
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(26.dp),
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size(22.dp),
                 )
             }
+            Spacer(modifier = Modifier.width(14.dp))
+        }
+        Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
-                style = MaterialTheme.typography.titleLarge,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
+            if (count != null && count > 0) {
+                Text(
+                    text = count.toString(),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
-        HorizontalDivider(
-            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-            modifier = Modifier.padding(horizontal = 16.dp),
-        )
-        Spacer(modifier = Modifier.height(8.dp))
     }
 }
 
