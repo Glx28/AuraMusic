@@ -113,6 +113,8 @@ import com.auramusic.app.constants.ShowTopPlaylistKey
 import com.auramusic.app.constants.ShowUploadedPlaylistKey
 import com.auramusic.app.constants.SliderStyle
 import com.auramusic.app.constants.SliderStyleKey
+import com.auramusic.app.constants.NavBarPosition
+import com.auramusic.app.constants.NavBarPositionKey
 import com.auramusic.app.constants.SlimNavBarKey
 import com.auramusic.app.constants.ListenTogetherAtTopKey
 import com.auramusic.app.constants.SelectedFontKey
@@ -315,6 +317,11 @@ fun AppearanceSettings(
     val (slimNav, onSlimNavChange) = rememberPreference(
         SlimNavBarKey,
         defaultValue = false
+    )
+
+    val (navBarPosition, onNavBarPositionChange) = rememberPreference(
+        NavBarPositionKey,
+        defaultValue = NavBarPosition.AUTO.name,
     )
 
     val (listenTogetherAtTop, onListenTogetherAtTopChange) = rememberPreference(
@@ -2188,6 +2195,32 @@ fun AppearanceSettings(
                         )
                     },
                     onClick = { onSwipeToRemoveSongChange(!swipeToRemoveSong) }
+                ),
+                Material3SettingsItem(
+                    icon = painterResource(R.drawable.nav_bar),
+                    title = { Text(stringResource(R.string.nav_bar_position)) },
+                    description = {
+                        Text(
+                            stringResource(
+                                when (NavBarPosition.fromName(navBarPosition)) {
+                                    NavBarPosition.LEFT -> R.string.nav_bar_position_left
+                                    NavBarPosition.BOTTOM -> R.string.nav_bar_position_bottom
+                                    NavBarPosition.AUTO -> R.string.nav_bar_position_auto
+                                },
+                            ),
+                        )
+                    },
+                    onClick = {
+                        // Auto -> left -> bottom -> auto, so every option is reachable
+                        // with one tap.
+                        onNavBarPositionChange(
+                            when (NavBarPosition.fromName(navBarPosition)) {
+                                NavBarPosition.AUTO -> NavBarPosition.LEFT.name
+                                NavBarPosition.LEFT -> NavBarPosition.BOTTOM.name
+                                NavBarPosition.BOTTOM -> NavBarPosition.AUTO.name
+                            },
+                        )
+                    },
                 ),
                 Material3SettingsItem(
                     icon = painterResource(R.drawable.nav_bar),

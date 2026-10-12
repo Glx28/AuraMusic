@@ -145,6 +145,8 @@ import com.auramusic.app.constants.PureBlackKey
 import com.auramusic.app.constants.SYSTEM_DEFAULT
 import com.auramusic.app.constants.SelectedThemeColorKey
 import com.auramusic.app.constants.SlimNavBarHeight
+import com.auramusic.app.constants.NavBarPosition
+import com.auramusic.app.constants.NavBarPositionKey
 import com.auramusic.app.constants.SlimNavBarKey
 import com.auramusic.app.constants.StopMusicOnTaskClearKey
 import com.auramusic.app.constants.UpdateNotificationsEnabledKey
@@ -728,6 +730,10 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val (slimNav) = rememberPreference(SlimNavBarKey, defaultValue = false)
+                val (navBarPosition) = rememberPreference(
+                    NavBarPositionKey,
+                    defaultValue = NavBarPosition.AUTO.name,
+                )
 
                 // Navigation items
                 val navigationItems = remember {
@@ -799,7 +805,13 @@ class MainActivity : ComponentActivity() {
                 val isLandscape = windowSize.width > windowSize.height
                 val isTabletWidth = windowSize.width >= 600.dp && windowSize.height >= 480.dp
 
-                val showRail = (isLandscape || isTabletWidth) && !inSearchScreen
+                // Tablets and wide phones get a choice: the side rail is out of the
+                // thumb's reach in portrait, so it is no longer forced on them.
+                val showRail = when (NavBarPosition.fromName(navBarPosition)) {
+                    NavBarPosition.LEFT -> !inSearchScreen
+                    NavBarPosition.BOTTOM -> false
+                    NavBarPosition.AUTO -> (isLandscape || isTabletWidth) && !inSearchScreen
+                }
 
                 val navPadding = if (shouldShowNavigationBar && !showRail) {
                     if (slimNav) SlimNavBarHeight else NavigationBarHeight

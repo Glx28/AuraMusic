@@ -27,6 +27,24 @@ val PureBlackMiniPlayerKey = booleanPreferencesKey("pureBlackMiniPlayer")
 val MiniPlayerOutlineKey = booleanPreferencesKey("miniPlayerOutline")
 val DefaultOpenTabKey = stringPreferencesKey("defaultOpenTab")
 val SlimNavBarKey = booleanPreferencesKey("slimNavBar")
+val NavBarPositionKey = stringPreferencesKey("navBarPosition")
+
+/**
+ * Where the main navigation lives on a large screen. Tablets used to be locked to the
+ * side rail, which puts the controls somewhere the thumb is not when the device is held
+ * in portrait - so this is a choice, not a rule.
+ */
+enum class NavBarPosition {
+    /** Side rail when there is room for it, bottom bar otherwise. */
+    AUTO,
+    LEFT,
+    BOTTOM;
+
+    companion object {
+        fun fromName(value: String?): NavBarPosition =
+            entries.firstOrNull { it.name == value } ?: AUTO
+    }
+}
 val ListenTogetherAtTopKey = booleanPreferencesKey("listenTogetherAtTop")
 val GridItemsSizeKey = stringPreferencesKey("gridItemSize")
 val SliderStyleKey = stringPreferencesKey("sliderStyle")

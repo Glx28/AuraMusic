@@ -50,6 +50,11 @@
     <string name="video_category_personal">For You</string>
     <string name="video_category_music_query">music videos</string>
     <string name="video_section_feed">Feed</string>
+    <string name="see_more">See more</string>
+    <string name="nav_bar_position">Navigation bar position</string>
+    <string name="nav_bar_position_auto">Automatic: side rail when there is room</string>
+    <string name="nav_bar_position_left">Always on the left</string>
+    <string name="nav_bar_position_bottom">Always at the bottom</string>
     <string name="video_category_gaming_query">gaming</string>
     <string name="video_category_new_query">new videos</string>
     <string name="videos_grid_view">Grid view</string>

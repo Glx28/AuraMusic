@@ -16,6 +16,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.remember
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
@@ -47,8 +50,14 @@ fun AppNavigationRail(
 ) {
     val containerColor = if (pureBlack) Color.Black else MaterialTheme.colorScheme.surfaceContainer
     
+    // Centred vertically: left to itself the rail's content sits against the top of the
+    // window, which put the navigation in the corner instead of halfway down the side.
+    Box(
+        modifier = modifier.fillMaxHeight(),
+        contentAlignment = Alignment.Center,
+    ) {
     NavigationRail(
-        modifier = modifier,
+        modifier = Modifier.fillMaxHeight(),
         containerColor = containerColor
     ) {
         navigationItems.forEach { screen ->
@@ -70,6 +79,7 @@ fun AppNavigationRail(
                 }
             )
         }
+    }
     }
 }
 

@@ -70,6 +70,7 @@ import com.auramusic.app.R
 import com.auramusic.app.utils.VideoThumbnails
 import com.auramusic.app.utils.compactViewCount
 import com.auramusic.app.utils.linkifiedText
+import com.auramusic.app.ui.component.MarqueeTitle
 import com.auramusic.app.video.VideoPlaybackManager
 import com.auramusic.innertube.NewPipeExtractor
 import com.auramusic.innertube.YouTube
@@ -107,6 +108,7 @@ fun ChannelScreen(
 
     var header by remember { mutableStateOf<ChannelHeader?>(null) }
     var videos by remember(channelId) { mutableStateOf<List<YouTubeVideoItem>>(emptyList()) }
+    var channelListView by remember { mutableStateOf(false) }
     var continuation by remember(channelId) { mutableStateOf<String?>(null) }
     var posts by remember(channelId) { mutableStateOf<List<YouTubeChannelPost>>(emptyList()) }
     var postsContinuation by remember(channelId) { mutableStateOf<String?>(null) }
@@ -344,7 +346,6 @@ fun ChannelScreen(
                 isLoading = isLoading,
                 isSubscribed = isSubscribed,
                 isSubscribing = isSubscribing,
-                onBackClick = { navController.navigateUp() },
                 onSubscribeClick = { toggleSubscribe() },
             )
         }
@@ -356,6 +357,9 @@ fun ChannelScreen(
             ChannelTabBar(
                 selectedTab = selectedTab,
                 onSelect = { selectedTab = it },
+                onBack = { navController.navigateUp() },
+                listView = channelListView,
+                onToggleView = { channelListView = !channelListView },
             )
         }
 
@@ -471,30 +475,42 @@ fun ChannelScreen(
                         }
                     }
                 } else {
-                    items(
-                        count = videos.size,
-                        key = { "video_${videos[it].videoId}" },
-                        span = { GridItemSpan(maxLineSpan) },
-                    ) { index ->
-                        val video = videos[index]
-                        ChannelVideoRow(
-                            video = video,
-                            onClick = {
-                                VideoPlaybackManager.playWithDetails(
-                                    context = context,
-                                    videoId = video.videoId,
-                                    title = video.title,
-                                    channelName = video.channelName.ifBlank { header?.title.orEmpty() },
-                                    channelId = video.channelId ?: header?.channelId,
-                                    channelThumbnail = header?.avatarUrl,
-                                    description = video.description,
-                                    viewCountText = video.viewCountText,
-                                    publishedTimeText = video.publishedTimeText,
-                                    thumbnails = video.thumbnails,
-                                    channels = video.channels,
-                                )
-                            },
+                    val playVideo: (YouTubeVideoItem) -> Unit = { video ->
+                        VideoPlaybackManager.playWithDetails(
+                            context = context,
+                            videoId = video.videoId,
+                            title = video.title,
+                            channelName = video.channelName.ifBlank { header?.title.orEmpty() },
+                            channelId = video.channelId ?: header?.channelId,
+                            channelThumbnail = header?.avatarUrl,
+                            description = video.description,
+                            viewCountText = video.viewCountText,
+                            publishedTimeText = video.publishedTimeText,
+                            thumbnails = video.thumbnails,
+                            channels = video.channels,
                         )
+                    }
+                    if (channelListView) {
+                        items(
+                            count = videos.size,
+                            key = { "video_${videos[it].videoId}" },
+                            span = { GridItemSpan(maxLineSpan) },
+                        ) { index ->
+                            val video = videos[index]
+                            ChannelVideoRow(video = video, onClick = { playVideo(video) })
+                        }
+                    } else {
+                        // Grid: the same run of videos, tiled. YouTube's channel API no
+                        // longer returns shelves or section titles for a channel (verified
+                        // live: a flat list of items, zero shelf renderers), so the layout
+                        // is the only grouping available - grid or list, nothing invented.
+                        items(
+                            count = videos.size,
+                            key = { "video_${videos[it].videoId}" },
+                        ) { index ->
+                            val video = videos[index]
+                            ChannelVideoGridCard(video = video, onClick = { playVideo(video) })
+                        }
                     }
                     if (isLoadingMore) {
                         item(
@@ -537,7 +553,6 @@ private fun ChannelHeaderSection(
     isLoading: Boolean,
     isSubscribed: Boolean,
     isSubscribing: Boolean,
-    onBackClick: () -> Unit,
     onSubscribeClick: () -> Unit,
 ) {
     Column {
@@ -577,24 +592,6 @@ private fun ChannelHeaderSection(
                             )
                         ),
                 )
-            }
-
-            Surface(
-                onClick = onBackClick,
-                shape = CircleShape,
-                color = Color.Black.copy(alpha = 0.35f),
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(10.dp)
-                    .size(38.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        painter = painterResource(R.drawable.arrow_back),
-                        contentDescription = stringResource(R.string.dismiss),
-                        tint = Color.White,
-                    )
-                }
             }
         }
 
@@ -742,12 +739,30 @@ private fun ChannelHeaderSection(
 private fun ChannelTabBar(
     selectedTab: Int,
     onSelect: (Int) -> Unit,
+    onBack: () -> Unit,
+    listView: Boolean,
+    onToggleView: () -> Unit,
 ) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 4.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // The back affordance used to float on top of the channel art and covered the
+        // picture; it lives in this row instead, where nothing is hidden by it.
+        IconButton(onClick = onBack) {
+            Icon(
+                painter = painterResource(R.drawable.arrow_back),
+                contentDescription = stringResource(R.string.dismiss),
+            )
+        }
+        Box(modifier = Modifier.weight(1f)) {
     SecondaryScrollableTabRow(
         selectedTabIndex = selectedTab,
         containerColor = Color.Transparent,
         contentColor = MaterialTheme.colorScheme.primary,
-        edgePadding = 16.dp,
+        edgePadding = 4.dp,
         modifier = Modifier.fillMaxWidth(),
     ) {
         ChannelTab.entries.forEach { tab ->
@@ -763,6 +778,20 @@ private fun ChannelTabBar(
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 },
+            )
+        }
+        }
+        }
+        // Grid or list: the channel feed is a flat run of videos, and a list reads far
+        // better for the titles and metadata than a two-column grid does.
+        IconButton(onClick = onToggleView) {
+            Icon(
+                painter = painterResource(
+                    if (listView) R.drawable.grid_view else R.drawable.view_list,
+                ),
+                contentDescription = stringResource(
+                    if (listView) R.string.videos_grid_view else R.string.videos_list_view,
+                ),
             )
         }
     }
@@ -824,6 +853,48 @@ private fun ChannelAboutSection(header: ChannelHeader?) {
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ChannelVideoGridCard(
+    video: YouTubeVideoItem,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .clickable(onClick = onClick)
+            .padding(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        ThumbnailWithBadge(
+            thumbnailUrl = video.thumbnails.maxByOrNull { it.width ?: 0 }?.url
+                ?: VideoThumbnails.highQuality(video.videoId),
+            durationText = video.durationText,
+            isLive = video.isLive,
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(12.dp)),
+        )
+        MarqueeTitle(
+            text = video.title,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(horizontal = 4.dp),
+        )
+        val meta = listOfNotNull(video.viewCountText, video.publishedTimeText)
+            .joinToString(" \u00b7 ")
+            .takeIf { it.isNotBlank() }
+        if (meta != null) {
+            Text(
+                text = meta,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                modifier = Modifier.padding(horizontal = 4.dp),
+            )
         }
     }
 }

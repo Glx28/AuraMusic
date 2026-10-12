@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -38,6 +39,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults.Indicator
 import androidx.compose.material3.pulltorefresh.pullToRefresh
@@ -155,6 +157,8 @@ fun LibraryMixScreen(
     val savedVideos by remember {
         VideoPlaybackManager.savedVideosFlow(context)
     }.collectAsState(initial = emptyList())
+    // Which shelf the see-more grid is showing, if any.
+    var expandedShelf by remember { mutableStateOf<Int?>(null) }
     val playVideoEntry: (VideoPlaybackManager.VideoHistoryEntry) -> Unit = { entry ->
         VideoPlaybackManager.play(
             context = context,
@@ -380,6 +384,7 @@ fun LibraryMixScreen(
                                  channels = videoChannels,
                                  onPlayVideo = playVideoEntry,
                                  onOpenChannel = openVideoChannel,
+                                 onSeeMore = { expandedShelf = it },
                              )
                          }
                      }
@@ -389,7 +394,9 @@ fun LibraryMixScreen(
                              contentType = CONTENT_TYPE_HEADER,
                          ) {
                              Column(modifier = Modifier.fillMaxWidth()) {
-                                 VideoLibrarySectionHeader(R.string.liked_videos)
+                                 VideoLibrarySectionHeader(R.string.liked_videos) {
+                                        expandedShelf = R.string.liked_videos
+                                    }
                                  LazyRow(
                                      contentPadding = PaddingValues(horizontal = 12.dp),
                                      horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -411,7 +418,9 @@ fun LibraryMixScreen(
                              contentType = CONTENT_TYPE_HEADER,
                          ) {
                              Column(modifier = Modifier.fillMaxWidth()) {
-                                 VideoLibrarySectionHeader(R.string.saved_videos)
+                                 VideoLibrarySectionHeader(R.string.saved_videos) {
+                                        expandedShelf = R.string.saved_videos
+                                    }
                                  LazyRow(
                                      contentPadding = PaddingValues(horizontal = 12.dp),
                                      horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -702,6 +711,7 @@ fun LibraryMixScreen(
                                 channels = videoChannels,
                                 onPlayVideo = playVideoEntry,
                                 onOpenChannel = openVideoChannel,
+                                onSeeMore = { expandedShelf = it },
                             )
                         }
                     }
@@ -713,7 +723,9 @@ fun LibraryMixScreen(
                             contentType = CONTENT_TYPE_HEADER,
                         ) {
                             Column(modifier = Modifier.fillMaxWidth()) {
-                                VideoLibrarySectionHeader(R.string.liked_videos)
+                                VideoLibrarySectionHeader(R.string.liked_videos) {
+                                        expandedShelf = R.string.liked_videos
+                                    }
                                 LazyRow(
                                     contentPadding = PaddingValues(horizontal = 12.dp),
                                     horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -736,7 +748,9 @@ fun LibraryMixScreen(
                             contentType = CONTENT_TYPE_HEADER,
                         ) {
                             Column(modifier = Modifier.fillMaxWidth()) {
-                                VideoLibrarySectionHeader(R.string.saved_videos)
+                                VideoLibrarySectionHeader(R.string.saved_videos) {
+                                        expandedShelf = R.string.saved_videos
+                                    }
                                 LazyRow(
                                     contentPadding = PaddingValues(horizontal = 12.dp),
                                     horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -962,6 +976,37 @@ fun LibraryMixScreen(
                 .align(Alignment.TopCenter)
                 .padding(LocalPlayerAwareWindowInsets.current.asPaddingValues()),
         )
+
+        // One grid at a time: which shelf "see more" opened.
+        expandedShelf?.let { shelf ->
+            when (shelf) {
+                R.string.video_recently_watched -> VideoShelfGridDialog(
+                    titleRes = shelf,
+                    entries = videoHistory,
+                    onPlayVideo = playVideoEntry,
+                    onDismiss = { expandedShelf = null },
+                )
+                R.string.liked_videos -> VideoShelfGridDialog(
+                    titleRes = shelf,
+                    entries = likedVideos,
+                    onPlayVideo = playVideoEntry,
+                    onDismiss = { expandedShelf = null },
+                )
+                R.string.saved_videos -> VideoShelfGridDialog(
+                    titleRes = shelf,
+                    entries = savedVideos,
+                    onPlayVideo = playVideoEntry,
+                    onDismiss = { expandedShelf = null },
+                )
+                R.string.video_subscriptions -> VideoShelfGridDialog(
+                    titleRes = shelf,
+                    entries = emptyList(),
+                    channels = videoChannels,
+                    onOpenChannel = openVideoChannel,
+                    onDismiss = { expandedShelf = null },
+                )
+            }
+        }
     }
 }
 
@@ -975,10 +1020,13 @@ private fun LibraryVideoSections(
     channels: List<VideoPlaybackManager.VideoSubscribedChannel>,
     onPlayVideo: (VideoPlaybackManager.VideoHistoryEntry) -> Unit,
     onOpenChannel: (String) -> Unit,
+    onSeeMore: (Int) -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         if (history.isNotEmpty()) {
-            VideoLibrarySectionHeader(R.string.video_recently_watched)
+            VideoLibrarySectionHeader(R.string.video_recently_watched) {
+                onSeeMore(R.string.video_recently_watched)
+            }
             LazyRow(
                 contentPadding = PaddingValues(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -993,7 +1041,9 @@ private fun LibraryVideoSections(
             Spacer(modifier = Modifier.height(8.dp))
         }
         if (channels.isNotEmpty()) {
-            VideoLibrarySectionHeader(R.string.video_subscriptions)
+            VideoLibrarySectionHeader(R.string.video_subscriptions) {
+                onSeeMore(R.string.video_subscriptions)
+            }
             LazyRow(
                 contentPadding = PaddingValues(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -1011,26 +1061,119 @@ private fun LibraryVideoSections(
 }
 
 @Composable
-private fun VideoLibrarySectionHeader(titleRes: Int) {
-    Text(
-        text = stringResource(titleRes),
-        style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.SemiBold,
-        color = MaterialTheme.colorScheme.onSurface,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-    )
+private fun VideoLibrarySectionHeader(
+    titleRes: Int,
+    onSeeMore: (() -> Unit)? = null,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = stringResource(titleRes),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+        )
+        // The shelves show a handful of rows and cut the rest off with no way to reach
+        // them; "see more" opens the whole shelf as a grid.
+        if (onSeeMore != null) {
+            IconButton(onClick = onSeeMore, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    painter = painterResource(R.drawable.expand_more),
+                    contentDescription = stringResource(R.string.see_more),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        }
+    }
+}
+
+/** Full-screen grid of one Library shelf. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VideoShelfGridDialog(
+    titleRes: Int,
+    entries: List<VideoPlaybackManager.VideoHistoryEntry>,
+    channels: List<VideoPlaybackManager.VideoSubscribedChannel> = emptyList(),
+    onPlayVideo: (VideoPlaybackManager.VideoHistoryEntry) -> Unit = {},
+    onOpenChannel: (String) -> Unit = {},
+    onDismiss: () -> Unit,
+) {
+    androidx.compose.material3.BasicAlertDialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.94f)
+                .fillMaxHeight(0.86f),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = stringResource(titleRes),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f),
+                    )
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            painter = painterResource(R.drawable.close),
+                            contentDescription = stringResource(R.string.dismiss),
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                if (channels.isNotEmpty()) {
+                    // Channel shelves grid by avatar rather than thumbnail.
+                    androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 84.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        items(channels, key = { it.channelId }) { channel ->
+                            VideoChannelAvatar(
+                                channel = channel,
+                                onClick = { onOpenChannel(channel.channelId) },
+                            )
+                        }
+                    }
+                } else {
+                    androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 168.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        items(entries, key = { it.videoId }) { entry ->
+                            VideoHistoryThumb(
+                                entry = entry,
+                                onClick = { onPlayVideo(entry) },
+                                compact = true,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
 private fun VideoHistoryThumb(
     entry: VideoPlaybackManager.VideoHistoryEntry,
     onClick: () -> Unit,
+    compact: Boolean = false,
 ) {
     val watchProgress = entry.watchProgress
 
     Column(
         modifier = Modifier
-            .width(170.dp)
+            // In the see-more grid the tile is sized by its column, not by a fixed
+            // width; on the shelf it keeps the original strip size.
+            .then(if (compact) Modifier.fillMaxWidth() else Modifier.width(170.dp))
             .clip(RoundedCornerShape(12.dp))
             .clickable(onClick = onClick),
     ) {
