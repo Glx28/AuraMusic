@@ -192,6 +192,7 @@ import com.auramusic.app.ui.utils.toHighQualityThumbnail
 import com.auramusic.app.utils.makeTimeString
 import com.auramusic.app.utils.rememberEnumPreference
 import com.auramusic.app.utils.rememberPreference
+import com.auramusic.app.playback.AuraCanvasCache
 import com.auramusic.app.playback.AuraCanvasRepository
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.Dispatchers
@@ -726,7 +727,7 @@ fun BottomSheetPlayer(
             // The expanded player is the first thing that resolves canvases on a cold
             // start, so it is also the first chance to hand the repository a context.
             AuraCanvasRepository.attachContext(context)
-            auraCanvasUrl = runCatching {
+            val resolved = runCatching {
                 AuraCanvasRepository.findCanvasUrl(
                     title = mediaMetadata?.title,
                     artist = mediaMetadata?.artists?.joinToString(", ") { it.name },
@@ -734,6 +735,10 @@ fun BottomSheetPlayer(
                     durationMs = mediaMetadata?.duration?.takeIf { it > 0 }?.times(1000L)
                 )
             }.getOrNull()
+            auraCanvasUrl = resolved
+            // Keep the bytes on disk as soon as the track resolves, so the canvas is
+            // there later with no connection - the URL alone is not enough.
+            if (resolved != null) AuraCanvasCache.prefetch(context, resolved)
         } else {
             auraCanvasUrl = null
         }

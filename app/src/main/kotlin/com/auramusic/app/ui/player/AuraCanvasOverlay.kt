@@ -33,8 +33,10 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import com.auramusic.app.LocalPlayerConnection
+import com.auramusic.app.playback.AuraCanvasCache
 import com.auramusic.app.playback.AuraCanvasRepository
 import timber.log.Timber
 
@@ -67,11 +69,18 @@ fun AuraCanvasOverlay(
     val url = canvasUrl ?: return
 
     val exoPlayer = remember {
-        ExoPlayer.Builder(context).build().apply {
-            volume = 0f
-            repeatMode = Player.REPEAT_MODE_ONE
-            playWhenReady = true
-        }
+        ExoPlayer.Builder(context)
+            // Same canvas cache as the grid tiles, so the fullscreen canvas is there
+            // offline too - otherwise it is the first thing that turns black.
+            .setMediaSourceFactory(
+                DefaultMediaSourceFactory(context)
+                    .setDataSourceFactory(AuraCanvasCache.dataSourceFactory(context)),
+            )
+            .build().apply {
+                volume = 0f
+                repeatMode = Player.REPEAT_MODE_ONE
+                playWhenReady = true
+            }
     }
 
     DisposableEffect(exoPlayer) {

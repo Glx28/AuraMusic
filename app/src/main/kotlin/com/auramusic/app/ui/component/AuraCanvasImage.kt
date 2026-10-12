@@ -28,9 +28,11 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import coil3.compose.AsyncImage
 import com.auramusic.app.constants.AuraCanvasEnabledKey
+import com.auramusic.app.playback.AuraCanvasCache
 import com.auramusic.app.playback.AuraCanvasRepository
 import com.auramusic.app.utils.rememberPreference
 import timber.log.Timber
@@ -65,9 +67,14 @@ fun AuraCanvasImage(
         if (!enabled) return@LaunchedEffect
         // Give the repository its context so resolved URLs survive a restart.
         AuraCanvasRepository.attachContext(context)
-        canvasUrl = runCatching {
+        val url = runCatching {
             AuraCanvasRepository.findCanvasUrl(title, artist, album, durationMs)
         }.getOrNull()
+        canvasUrl = url
+        // Pull the video down in full while there is a connection: a canvas that was
+        // only watched for its first few seconds would otherwise keep almost nothing on
+        // disk and still play black offline.
+        if (url != null) AuraCanvasCache.prefetch(context, url)
     }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -96,11 +103,18 @@ private fun CanvasVideo(
     var isReady by remember { mutableStateOf(false) }
 
     val exoPlayer = remember {
-        ExoPlayer.Builder(context).build().apply {
-            volume = 0f
-            repeatMode = Player.REPEAT_MODE_ONE
-            playWhenReady = true
-        }
+        ExoPlayer.Builder(context)
+            // Reads through the canvas cache, so a canvas watched once keeps playing
+            // with the network off instead of turning into a black tile.
+            .setMediaSourceFactory(
+                DefaultMediaSourceFactory(context)
+                    .setDataSourceFactory(AuraCanvasCache.dataSourceFactory(context)),
+            )
+            .build().apply {
+                volume = 0f
+                repeatMode = Player.REPEAT_MODE_ONE
+                playWhenReady = true
+            }
     }
 
     DisposableEffect(exoPlayer) {
