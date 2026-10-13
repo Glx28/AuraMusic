@@ -1312,7 +1312,11 @@ object VideoPlaybackManager {
             // so a failed remote call (signed-out account, endpoint hiccup) must not leave
             // the two out of sync - the button would read "liked" while the shelf stayed empty.
             writeLikedVideo(session, newLiked)
-            YouTube.likeVideo(session.videoId, newLiked)
+            // Music videos only, for the same reason as saves: the account's library
+            // should mirror this shelf, not every video opened from it.
+            if (MusicContentFilter.isMusic(session.videoId)) {
+                YouTube.likeVideo(session.videoId, newLiked)
+            }
             _uiState.update {
                 it.copy(
                     isLiked = newLiked,
@@ -1414,6 +1418,38 @@ object VideoPlaybackManager {
         }
     }
 
+    /**
+     * Pulls the account's Watch Later queue into the local Saved shelf.
+     *
+     * Called once after signing in. Only music videos are imported - this side is a
+     * music shelf - and nothing already saved is removed, so the merge can only ever
+     * add. Runs off the interaction path and never blocks it.
+     */
+    suspend fun syncSavedVideosFromAccount(context: Context) {
+        if (!YouTube.isLoggedIn()) return
+        withContext(Dispatchers.IO) {
+            val page = YouTube.playlist(YOUTUBE_WATCH_LATER_ID).getOrNull() ?: return@withContext
+            val candidates = page.songs
+                .mapNotNull { it.id }
+                .filter { it.isNotBlank() }
+            if (candidates.isEmpty()) return@withContext
+
+            // The filter is cached, so a queue already seen costs nothing here.
+            val musicVideos = candidates.filter { MusicContentFilter.isMusic(it) }
+            if (musicVideos.isEmpty()) return@withContext
+
+            try {
+                context.dataStore.edit { settings ->
+                    val saved = settings[SavedVideoIdsKey]?.toMutableSet() ?: mutableSetOf()
+                    saved.addAll(musicVideos)
+                    settings[SavedVideoIdsKey] = saved
+                }
+            } catch (e: Exception) {
+                // Best effort: the shelf keeps what it already had.
+            }
+        }
+    }
+
     /** Why the last subscribe attempt failed, if it did. */
     @Volatile var subscribeErrorMessage: String? = null
 
@@ -1421,19 +1457,47 @@ object VideoPlaybackManager {
         val session = _uiState.value.session ?: return
         val newSaved = !_uiState.value.isSaved
         val ctx = currentContext ?: return
+        // Flipped before the call: the shelf and the button follow immediately, and the
+        // account call is the slow part.
+        _uiState.update { it.copy(isSaved = newSaved) }
         scope.launch {
-            // "Save" for a video is a local watch-later bookmark. The YouTube Music
-            // library add/remove endpoints only apply to songs, not arbitrary YouTube
-            // videos, so calling them here would mutate the music library (or fail).
-            // Persisting to DataStore keeps the toggle instant and consistent.
+            // Local first, so the toggle is instant and survives whatever happens to the
+            // account call below.
             ctx.dataStore.edit { settings ->
                 val saved = settings[SavedVideoIdsKey]?.toMutableSet() ?: mutableSetOf()
                 if (newSaved) saved.add(session.videoId) else saved.remove(session.videoId)
                 settings[SavedVideoIdsKey] = saved
             }
             writeSavedVideo(session, newSaved)
-            _uiState.update { it.copy(isSaved = newSaved) }
+            syncSavedVideoToAccount(session.videoId, newSaved)
         }
+    }
+
+    /**
+     * Mirrors a save into the account's Watch Later queue.
+     *
+     * Save and Watch Later are the same idea on two sides, so a video saved here should
+     * also be waiting on YouTube - and a video already there should not be added twice.
+     * Signed out, nothing is sent and nothing is lost: the local shelf still has it, and
+     * [syncSavedVideosFromAccount] picks it up when an account is there.
+     */
+    private suspend fun syncSavedVideoToAccount(videoId: String, saved: Boolean) {
+        if (!YouTube.isLoggedIn()) return
+        // Only music videos are mirrored to the account. The shelves on this side are a
+        // music shelf, so a vlog or a gaming clip saved there is the user's own business
+        // and has no place in their YouTube Watch Later.
+        if (!MusicContentFilter.isMusic(videoId)) return
+        runCatching {
+            if (saved) {
+                YouTube.addToPlaylist(YOUTUBE_WATCH_LATER_ID, videoId)
+            } else {
+                // Removing needs the set-video id of the entry in the queue, which only
+                // the queue itself knows.
+                val entry = YouTube.playlist(YOUTUBE_WATCH_LATER_ID).getOrNull()
+                    ?.songs?.firstOrNull { it.id == videoId }
+                entry?.setVideoId?.let { YouTube.removeFromPlaylist(YOUTUBE_WATCH_LATER_ID, videoId, it) }
+            }
+        }.onFailure { Timber.tag("VideoPlaybackManager").w(it, "Watch Later sync failed for %s", videoId) }
     }
 
     /** Keeps the Library's "Saved videos" shelf in step with the save toggle. */
@@ -2175,6 +2239,9 @@ const val MIN_RESUMABLE_DURATION_MS = 15_000L
 
 /** How often playback progress is published while the playhead is actually moving. */
 private const val ACTIVE_TICK_MS = 500L
+
+/** YouTube's built-in Watch Later queue, and the other side of a saved video. */
+private const val YOUTUBE_WATCH_LATER_ID = "WL"
 
 /** How often the ticker wakes when there is nothing on screen to redraw for it. */
 private const val IDLE_TICK_MS = 1_000L

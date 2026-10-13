@@ -31,6 +31,7 @@ import com.auramusic.kugou.KuGou
 import com.auramusic.lastfm.LastFM
 import com.auramusic.app.BuildConfig
 import com.auramusic.app.auth.GoogleAccountLogin
+import com.auramusic.app.video.VideoPlaybackManager
 import com.auramusic.app.constants.*
 import com.auramusic.app.db.MusicDatabase
 import com.auramusic.app.di.ApplicationScope
@@ -91,6 +92,9 @@ class App : Application(), SingletonImageLoader.Factory {
             // System-account tokens lapse after about an hour; re-mint the stored one so a
             // resumed session keeps its Google sign-in without prompting again.
             GoogleAccountLogin.silentRefresh(this@App)
+            // Bring the account's Watch Later across so the Saved shelf is not an
+            // island - only the music videos in it, matching what this side syncs out.
+            VideoPlaybackManager.syncSavedVideosFromAccount(this@App)
         }
         
         // Initialize voice feedback manager (TTS)

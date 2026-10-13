@@ -986,6 +986,22 @@ fun ArtistScreen(
             }
         },
         actions = {
+            // Through to the same artist on the video side. The channel id is what the
+            // video channel screen keys on, so this is the one direction that can be an
+            // exact match rather than a guess on the name.
+            val artistChannelId = libraryArtist?.artist?.channelId
+            if (artistChannelId != null) {
+                IconButton(
+                    onClick = {
+                        navController.navigate("youtube_channel/$artistChannelId")
+                    },
+                ) {
+                    Icon(
+                        painterResource(R.drawable.slow_motion_video),
+                        contentDescription = stringResource(R.string.open_channel),
+                    )
+                }
+            }
             IconButton(
                 onClick = {
                     viewModel.artistPage?.artist?.shareLink?.let { link ->

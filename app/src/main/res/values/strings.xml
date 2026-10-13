@@ -53,6 +53,8 @@
     <string name="see_more">See more</string>
     <string name="subscribe_needs_account">Sign in to subscribe to channels</string>
     <string name="subscribe_failed">Could not update your subscription</string>
+    <string name="open_artist">Open artist</string>
+    <string name="open_channel">Open channel</string>
     <string name="nav_bar_position">Navigation bar position</string>
     <string name="nav_bar_position_auto">Automatic: side rail when there is room</string>
     <string name="nav_bar_position_left">Always on the left</string>
