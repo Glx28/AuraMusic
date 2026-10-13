@@ -1134,4 +1134,7 @@
     <string name="video_codec_hint">Если устройство не поддерживает аппаратное декодирование используемого кодека, воспроизведение будет прерываться. Если вы не знаете, какой вариант выбрать, оставьте настройку в положении «Авто».</string>
     <string name="video_download_format">%1$s · %2$s</string>
     <string name="video_download">Скачать</string>
+    <string name="login_email_hint">Введите адрес электронной почты и пароль здесь</string>
+    <string name="email">Email</string>
+    <string name="continue_with_google">Продолжить с Google</string>
 </resources>
