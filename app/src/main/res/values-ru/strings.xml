@@ -1098,4 +1098,6 @@
     <string name="video_player_float">Плавающее видео</string>
     <string name="video_section_feed">Лента</string>
     <string name="see_more">Показать больше</string>
+    <string name="login_with_google_account">Продолжить с Google</string>
+    <string name="login_google_account_hint">Используйте учетную запись Google уже на этом устройстве - не нужен пароль</string>
 </resources>
