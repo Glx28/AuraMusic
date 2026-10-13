@@ -56,6 +56,7 @@
     <string name="open_artist">Open artist</string>
     <string name="video_download">Download</string>
     <string name="video_downloading">Downloading</string>
+    <string name="video_download_failed">Download failed - tap to retry</string>
     <string name="video_downloaded">Downloaded • %1$s</string>
     <string name="video_downloads">Video downloads</string>
     <string name="no_video_downloads">No downloaded videos</string>
@@ -316,6 +317,10 @@
     <string name="duplicates_description_single">The song is already in your playlist</string>
     <string name="duplicates_description_multiple">%d songs are already in your playlist</string>
     <!-- Noun -->
+    <plurals name="n_download">
+        <item quantity="one">%d download</item>
+        <item quantity="other">%d downloads</item>
+    </plurals>
     <plurals name="n_song">
         <item quantity="one">%d song</item>
         <item quantity="other">%d songs</item>

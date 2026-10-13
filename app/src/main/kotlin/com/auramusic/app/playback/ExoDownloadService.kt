@@ -56,8 +56,7 @@ class ExoDownloadService : DownloadService(
                 this,
                 R.drawable.download,
                 null,
-                if (downloads.size == 1) Util.fromUtf8Bytes(downloads[0].request.data)
-                else resources.getQuantityString(R.plurals.n_song, downloads.size, downloads.size),
+                downloadLabel(this, downloads),
                 downloads,
                 notMetRequirements
             )
@@ -95,7 +94,7 @@ class ExoDownloadService : DownloadService(
                     context,
                     R.drawable.error,
                     null,
-                    Util.fromUtf8Bytes(download.request.data)
+                    downloadLabel(context, listOf(download))
                 )
                 NotificationUtil.setNotification(context, nextNotificationId++, notification)
             }
@@ -103,6 +102,36 @@ class ExoDownloadService : DownloadService(
     }
 
     companion object {
+        /**
+         * What the notification says is happening.
+         *
+         * A song carries its title in the download's data. A video carries the whole record
+         * it needs to be played back from, so its title and channel are read out of that
+         * rather than shown as the raw text - a notification is one line, and a video's
+         * record is a page. Several at once are counted rather than named, since there is
+         * only room for one line and the number is the thing worth knowing.
+         */
+        private fun downloadLabel(context: Context, downloads: List<Download>): String? {
+            if (downloads.size != 1) {
+                return context.resources.getQuantityString(R.plurals.n_download, downloads.size, downloads.size)
+            }
+            val data = downloads[0].request.data ?: return null
+            val text = Util.fromUtf8Bytes(data)
+            // Songs store the title and nothing else; videos store a JSON record.
+            if (!text.trimStart().startsWith("{")) return text
+            return runCatching {
+                val record = org.json.JSONObject(text)
+                val title = record.optString("t").trim()
+                val channel = record.optString("c").trim()
+                when {
+                    title.isEmpty() && channel.isEmpty() -> null
+                    channel.isEmpty() -> title
+                    title.isEmpty() -> channel
+                    else -> "$title \u2022 $channel"
+                }
+            }.getOrNull()
+        }
+
         const val CHANNEL_ID = "download"
         const val NOTIFICATION_ID = 1
         const val JOB_ID = 1

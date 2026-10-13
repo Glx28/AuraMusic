@@ -397,6 +397,18 @@ fun LibraryMixScreen(
                          headerContent()
                      }
 
+                     item(
+                         key = "videoDownloadsSection",
+                         contentType = CONTENT_TYPE_HEADER,
+                     ) {
+                         LibraryVideoDownloadsSection(
+                             downloads = videoDownloads,
+                             onPlayDownload = playDownload,
+                             onRemoveDownload = removeDownload,
+                             onSeeMore = { expandedShelf = R.string.video_downloads },
+                         )
+                     }
+
                      if (videoHistory.isNotEmpty() || videoChannels.isNotEmpty()) {
                          item(
                              key = "videoSections",
@@ -408,9 +420,6 @@ fun LibraryMixScreen(
                                  onPlayVideo = playVideoEntry,
                                  onOpenChannel = openVideoChannel,
                                  onSeeMore = { expandedShelf = it },
-                                 videoDownloads = videoDownloads,
-                                 onPlayDownload = playDownload,
-                                 onRemoveDownload = removeDownload,
                              )
                          }
                      }
@@ -728,6 +737,19 @@ fun LibraryMixScreen(
 
                     if (videoHistory.isNotEmpty() || videoChannels.isNotEmpty()) {
                         item(
+                            key = "videoDownloadsSection",
+                            span = { GridItemSpan(maxLineSpan) },
+                            contentType = CONTENT_TYPE_HEADER,
+                        ) {
+                            LibraryVideoDownloadsSection(
+                                downloads = videoDownloads,
+                                onPlayDownload = playDownload,
+                                onRemoveDownload = removeDownload,
+                                onSeeMore = { expandedShelf = R.string.video_downloads },
+                            )
+                        }
+
+                        item(
                             key = "videoSections",
                             span = { GridItemSpan(maxLineSpan) },
                             contentType = CONTENT_TYPE_HEADER,
@@ -738,9 +760,6 @@ fun LibraryMixScreen(
                                 onPlayVideo = playVideoEntry,
                                 onOpenChannel = openVideoChannel,
                                 onSeeMore = { expandedShelf = it },
-                                videoDownloads = videoDownloads,
-                                onPlayDownload = playDownload,
-                                onRemoveDownload = removeDownload,
                             )
                         }
                     }
@@ -1027,6 +1046,12 @@ fun LibraryMixScreen(
                     onPlayVideo = playVideoEntry,
                     onDismiss = { expandedShelf = null },
                 )
+                R.string.video_downloads -> VideoDownloadsDialog(
+                    downloads = videoDownloads,
+                    onPlayDownload = playDownload,
+                    onRemoveDownload = removeDownload,
+                    onDismiss = { expandedShelf = null },
+                )
                 R.string.video_subscriptions -> VideoShelfGridDialog(
                     titleRes = shelf,
                     entries = emptyList(),
@@ -1036,6 +1061,40 @@ fun LibraryMixScreen(
                 )
             }
         }
+    }
+}
+
+/**
+ * Downloaded videos, on their own shelf.
+ *
+ * Downloads used to sit inside the video shelves, which meant they were only reachable
+ * once there was watch history or a subscription to sit them beside - so the videos
+ * that were on the device and nothing else were the ones that could not be found. They
+ * are their own thing here: files on the device rather than things watched.
+ */
+@Composable
+private fun LibraryVideoDownloadsSection(
+    downloads: List<VideoDownloadStore.Entry>,
+    onPlayDownload: (VideoDownloadStore.Entry) -> Unit,
+    onRemoveDownload: (VideoDownloadStore.Entry) -> Unit,
+    onSeeMore: () -> Unit,
+) {
+    if (downloads.isEmpty()) return
+    Column(modifier = Modifier.fillMaxWidth()) {
+        VideoLibrarySectionHeader(R.string.video_downloads, onSeeMore)
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(downloads, key = { it.videoId }) { download ->
+                VideoDownloadThumb(
+                    download = download,
+                    onClick = { onPlayDownload(download) },
+                    onRemove = { onRemoveDownload(download) },
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
     }
 }
 
@@ -1050,9 +1109,6 @@ private fun LibraryVideoSections(
     onPlayVideo: (VideoPlaybackManager.VideoHistoryEntry) -> Unit,
     onOpenChannel: (String) -> Unit,
     onSeeMore: (Int) -> Unit,
-    videoDownloads: List<VideoDownloadStore.Entry> = emptyList(),
-    onPlayDownload: (VideoDownloadStore.Entry) -> Unit = {},
-    onRemoveDownload: (VideoDownloadStore.Entry) -> Unit = {},
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         if (history.isNotEmpty()) {
@@ -1067,27 +1123,6 @@ private fun LibraryVideoSections(
                     VideoHistoryThumb(
                         entry = entry,
                         onClick = { onPlayVideo(entry) },
-                    )
-                }
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-        }
-        // Downloads are listed separately from the other shelves: videos are files on
-        // the device rather than entries in the watch history, and mixing the two made
-        // both harder to read.
-        if (videoDownloads.isNotEmpty()) {
-            VideoLibrarySectionHeader(R.string.video_downloads) {
-                onSeeMore(R.string.video_downloads)
-            }
-            LazyRow(
-                contentPadding = PaddingValues(horizontal = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                items(videoDownloads, key = { it.videoId }) { download ->
-                    VideoDownloadThumb(
-                        download = download,
-                        onClick = { onPlayDownload(download) },
-                        onRemove = { onRemoveDownload(download) },
                     )
                 }
             }
@@ -1297,6 +1332,63 @@ private fun VideoShelfGridDialog(
                                 compact = true,
                             )
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Every video on the device, as a grid.
+ *
+ * The audio side of downloads opens a screen of its own, so this is the video side's
+ * equivalent: a list of what is actually on the device, playable and removable, rather
+ * than the three or four that fit on a shelf.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VideoDownloadsDialog(
+    downloads: List<VideoDownloadStore.Entry>,
+    onPlayDownload: (VideoDownloadStore.Entry) -> Unit,
+    onRemoveDownload: (VideoDownloadStore.Entry) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    androidx.compose.material3.BasicAlertDialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.94f)
+                .fillMaxHeight(0.86f),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = stringResource(R.string.video_downloads),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f),
+                    )
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            painter = painterResource(R.drawable.close),
+                            contentDescription = stringResource(R.string.dismiss),
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 168.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    items(downloads, key = { it.videoId }) { download ->
+                        VideoDownloadThumb(
+                            download = download,
+                            onClick = { onPlayDownload(download) },
+                            onRemove = { onRemoveDownload(download) },
+                        )
                     }
                 }
             }

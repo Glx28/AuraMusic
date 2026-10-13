@@ -2291,13 +2291,23 @@ private fun DownloadActionButton() {
 
         else -> {
             val downloading = progress?.done == false && progress.failed == false
+            // The ring is only as good as the total it is measured against; a stream
+            // that does not report its length gives a bar that jumps about, so the
+            // figure is left out until one is known.
+            val fraction = progress
+                ?.takeIf { it.totalBytes > 0 && downloading }
+                ?.let { (it.downloadedBytes.toFloat() / it.totalBytes).coerceIn(0f, 1f) }
             ActionButton(
                 icon = if (entry != null) R.drawable.check else R.drawable.download,
                 label = when {
                     entry != null -> stringResource(R.string.video_downloaded, formatBytes(entry.sizeBytes))
+                    downloading && fraction != null ->
+                        "${(fraction * 100).toInt()}%"
                     downloading -> stringResource(R.string.video_downloading)
+                    progress?.failed == true -> stringResource(R.string.video_download_failed)
                     else -> stringResource(R.string.video_download)
                 },
+                progress = fraction,
                 selected = entry != null,
                 // Asks what to fetch rather than taking a quality the user never chose -
                 // the same choice YouTube makes, and the one that decides how much of
@@ -2526,6 +2536,13 @@ private fun ActionButton(
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * How far along the work is, 0 to 1. Null when there is none. The button draws a
+     * ring instead of its icon while set: a download that reports nothing until it
+     * finishes looks identical to one that has not started, and a video takes long
+     * enough for that to be the whole of the wait.
+     */
+    progress: Float? = null,
 ) {
     val haptic = LocalHapticFeedback.current
     Surface(
@@ -2542,12 +2559,22 @@ private fun ActionButton(
             horizontalArrangement = Arrangement.Center,
             modifier = Modifier.padding(horizontal = 8.dp)
         ) {
-            Icon(
-                painter = painterResource(icon),
-                contentDescription = label,
-                modifier = Modifier.size(20.dp),
-                tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            if (progress != null) {
+                CircularProgressIndicator(
+                    progress = { progress.coerceIn(0f, 1f) },
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f),
+                )
+            } else {
+                Icon(
+                    painter = painterResource(icon),
+                    contentDescription = label,
+                    modifier = Modifier.size(20.dp),
+                    tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             Spacer(modifier = Modifier.width(6.dp))
             Text(
                 text = label,
