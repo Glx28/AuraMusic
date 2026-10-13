@@ -226,6 +226,13 @@ object VideoPlaybackManager {
         val autoplayEnabled: Boolean = true,
         val suppressOverlay: Boolean = false,
         val isFullScreen: Boolean = false,
+        /**
+         * Surface fills the screen while the video keeps its own shape, centred.
+         *
+         * Not the same as landscape: the video is not stretched or cropped, only the
+         * surface around it grows. Reached by pushing down on the video.
+         */
+        val zoomMode: Boolean = false,
         // Display aspect ratio of the playing video, used to size the picture-in-picture
         // window. Null until the decoder reports it.
         val videoAspectRatio: Float? = null,
@@ -1898,6 +1905,17 @@ object VideoPlaybackManager {
         val newFullScreen = !_uiState.value.isFullScreen
         _uiState.update { it.copy(isFullScreen = newFullScreen) }
         applyOrientation(newFullScreen)
+    }
+
+    /**
+     * Grows the video surface to the whole screen while the video keeps its own aspect
+     * and sits centred, so a portrait video stays portrait instead of being cropped or
+     * stretched to fill.
+     */
+    fun toggleZoomMode() {
+        val zoom = !_uiState.value.zoomMode
+        _uiState.update { it.copy(zoomMode = zoom) }
+        if (zoom) applyOrientation(false)
     }
 
     /**

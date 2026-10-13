@@ -388,12 +388,42 @@ private fun VideoExpandedPlayer(
 
     var showControls by remember { mutableStateOf(true) }
 
+    // The surface on its own, filling the screen with the video centred inside it: either
+    // full screen, or the zoom reached by pushing down. In both, the details below are
+    // not shown - a video filling the window has no room beside it, and scrolling a
+    // description underneath a black surface is worse than nothing.
+    val surfaceOnly = uiState.isFullScreen || uiState.zoomMode
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        if (isWideScreen) {
+        if (surfaceOnly) {
+            VideoSurfaceWithControls(
+                player = player,
+                session = session,
+                uiState = uiState,
+                showControls = showControls,
+                onControlsChange = { showControls = it },
+                onCollapse = onCollapse,
+                onClose = onClose,
+                onPictureInPicture = onPictureInPicture,
+                // Fills the window; the player centres the video inside it at its own
+                // aspect, so a portrait video is neither cropped nor stretched.
+                modifier = Modifier.fillMaxSize(),
+                useFullHeight = true,
+                allowZoomDrag = true,
+                onChannelClick = onChannelClick,
+            )
+            UpNextTile(
+                uiState = uiState,
+                onPlayNext = { VideoPlaybackManager.playNext() },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+            )
+        } else if (isWideScreen) {
             // Tablets and other large screens: the video spans the full width at a
             // true 16:9, and everything else - title, channel, action buttons,
             // description, recommendations - sits underneath it.
@@ -507,6 +537,77 @@ private fun VideoExpandedPlayer(
  * double-tap sides seek ±10s, vertical drag collapses, horizontal drag scrubs).
  */
 @OptIn(UnstableApi::class)
+/**
+ * The next video, offered as a small tile while the current one finishes.
+ *
+ * Replaces the list of recommendations in a surface that has no room for one: inside a
+ * video that fills the window, a full Up Next pane either has nowhere to go or pushes the
+ * video off centre. It appears only in the last stretch of the video, so it cannot sit
+ * over the picture for the whole runtime.
+ */
+@Composable
+private fun UpNextTile(
+    uiState: VideoPlaybackManager.UiState,
+    onPlayNext: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val posMs by remember { derivedStateOf { VideoPlaybackManager.positionState.value.first } }
+    val durationMs = uiState.durationMs
+
+    val next = remember(uiState.queue, uiState.recommendations, uiState.session?.videoId) {
+        uiState.queue.firstOrNull { it.videoId != uiState.session?.videoId }
+            ?: uiState.recommendations.firstOrNull { it.videoId != uiState.session?.videoId }
+    }
+
+    // Only in the closing stretch, and only when there is room left to act on it.
+    val remaining = (durationMs - posMs).coerceAtLeast(0L)
+    val show = next != null && durationMs > 0 && remaining in 1 until UP_NEXT_TILE_WINDOW_MS
+
+    AnimatedVisibility(
+        visible = show,
+        enter = fadeIn(tween(250)),
+        exit = fadeOut(tween(200)),
+        modifier = modifier,
+    ) {
+        val item = next ?: return@AnimatedVisibility
+        Surface(
+            onClick = onPlayNext,
+            shape = RoundedCornerShape(12.dp),
+            color = Color.Black.copy(alpha = 0.7f),
+            modifier = Modifier.width(190.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.padding(8.dp),
+            ) {
+                AsyncImage(
+                    model = item.thumbnail,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(width = 92.dp, height = 52.dp)
+                        .clip(RoundedCornerShape(8.dp)),
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.video_player_up_next),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White.copy(alpha = 0.7f),
+                    )
+                    Text(
+                        text = item.title,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Color.White,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun VideoSurfaceWithControls(
     player: ExoPlayer,
@@ -518,6 +619,11 @@ private fun VideoSurfaceWithControls(
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
     useFullHeight: Boolean,
+    // Whether a downward drag in the middle of the picture should still be read as a
+    // gesture. It is off in a plain landscape player, where the height is already the
+    // whole screen and a drag there means nothing, and on once the surface has been
+    // grown deliberately - there the next step is to shrink it again.
+    allowZoomDrag: Boolean = false,
     onChannelClick: ((String) -> Unit)? = null,
     onPictureInPicture: (() -> Unit)? = null,
 ) {
@@ -664,7 +770,7 @@ private fun VideoSurfaceWithControls(
                         dragMode = when {
                             offset.x < size.width / 3f -> DragMode.BRIGHTNESS
                             offset.x > size.width * 2f / 3f -> DragMode.VOLUME
-                            !useFullHeight -> DragMode.COLLAPSE
+                            !useFullHeight || allowZoomDrag -> DragMode.COLLAPSE
                             else -> DragMode.NONE
                         }
                     },
@@ -672,7 +778,16 @@ private fun VideoSurfaceWithControls(
                         noteInteraction()
                         when (dragMode) {
                             DragMode.COLLAPSE -> {
-                                if (collapseDragPx > with(density) { 120.dp.toPx() }) onCollapse() else collapseDragPx = 0f
+                                if (collapseDragPx > with(density) { 120.dp.toPx() }) {
+                                    // Pushing down steps the surface up one notch at a
+                                    // time: ordinary, then the video filling the window
+                                    // with its own shape kept, and only then out of the
+                                    // way to the small player.
+                                    if (uiState.zoomMode || uiState.isFullScreen) onCollapse()
+                                    else VideoPlaybackManager.toggleZoomMode()
+                                } else {
+                                    collapseDragPx = 0f
+                                }
                             }
                             else -> collapseDragPx = 0f
                         }
@@ -3072,3 +3187,9 @@ private fun formatTime(ms: Long): String {
         "$minutes:${seconds.toString().padStart(2, '0')}"
     }
 }
+
+/**
+ * How long before the end the next video is offered as a tile. Long enough to see it,
+ * short enough that acting on it is still a choice rather than a fait accompli.
+ */
+private const val UP_NEXT_TILE_WINDOW_MS = 40_000L
