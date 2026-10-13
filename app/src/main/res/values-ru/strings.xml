@@ -1096,4 +1096,6 @@
     <string name="video_player_pip">Картинка-в-картинке</string>
     <string name="video_player_pip_not_supported">Опция \"картинка-в-картинке\" недоступна на данном устройстве</string>
     <string name="video_player_float">Плавающее видео</string>
+    <string name="video_section_feed">Лента</string>
+    <string name="see_more">Показать больше</string>
 </resources>
