@@ -1100,4 +1100,5 @@
     <string name="see_more">Показать больше</string>
     <string name="login_with_google_account">Продолжить с Google</string>
     <string name="login_google_account_hint">Используйте учетную запись Google уже на этом устройстве - не нужен пароль</string>
+    <string name="login_use_account">Используйте эту учетную запись</string>
 </resources>
