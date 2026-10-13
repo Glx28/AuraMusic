@@ -268,6 +268,11 @@
         </service>
 
         <service
+            android:name=".video.VideoDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <service
             android:name=".playback.ExoDownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync">

@@ -26,9 +26,6 @@ import com.auramusic.app.db.entities.SongEntity
 import com.auramusic.app.di.DownloadCache
 import com.auramusic.app.di.PlayerCache
 import com.auramusic.app.utils.YTPlayerUtils
-import com.auramusic.app.utils.toLibrary
-import com.auramusic.app.video.VideoDownloadKeys
-import com.auramusic.auravideo.AuraVideo
 import com.auramusic.app.utils.enumPreference
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -63,7 +60,6 @@ constructor(
     private val connectivityManager = context.getSystemService<ConnectivityManager>()!!
     private val audioQuality by enumPreference(context, AudioQualityKey, AudioQuality.AUTO)
     private val songUrlCache = HashMap<String, Pair<String, Long>>()
-    private val videoUrlCache = HashMap<String, Pair<VideoUrlHolder, Long>>()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -90,14 +86,6 @@ constructor(
                 ),
         ) { dataSpec ->
             val mediaId = dataSpec.key ?: error("No media id")
-
-            // A video, not a song. Answered before anything else: a video id resolved
-            // through the song path below would come back as an audio stream, and a
-            // "video" download that is actually an audio file is worse than a failure.
-            VideoDownloadKeys.parse(mediaId)?.let { parsed ->
-                val url = videoStreamUrlFor(parsed)
-                return@Factory dataSpec.withUri(url.toUri())
-            }
 
             val length = if (dataSpec.length >= 0) dataSpec.length else 1
 
@@ -228,69 +216,10 @@ constructor(
      * without it, every song row on screen re-emits and recomposes on every progress
      * tick of an unrelated download.
      */
-    /**
-     * The URL for one part of a video download.
-     *
-     * Resolving a stream means a full extraction each time, and a download reads its
-     * source many times over as it progresses, so the result is held for the length of
-     * the download. The parts of one video share a single resolution: they have to agree
-     * on the same audio, and asking twice is asking for two different answers.
-     */
-    private fun videoStreamUrlFor(parsed: VideoDownloadKeys.Parsed): String {
-        videoUrlCache[parsed.videoId]?.takeIf { it.second > System.currentTimeMillis() }?.let {
-            return it.first.urlFor(parsed.part)
-        }
-
-        val source = runBlocking(Dispatchers.IO) {
-            AuraVideo.getVideoStreamSource(
-                parsed.videoId,
-                parsed.quality.toLibrary(),
-                parsed.codec.toLibrary(),
-            )
-        }.getOrThrow()
-
-        val holder = VideoUrlHolder(
-            when (source) {
-                is AuraVideo.VideoStreamSource.Single -> source
-                is AuraVideo.VideoStreamSource.Merged -> source
-            },
-        )
-        videoUrlCache[parsed.videoId] = holder to (System.currentTimeMillis() + VIDEO_URL_TTL_MS)
-        return holder.urlFor(parsed.part)
-    }
-
-    /** A resolved video stream, answered per part. */
-    private data class VideoUrlHolder(
-        private val source: AuraVideo.VideoStreamSource,
-    ) {
-        fun urlFor(part: String): String = when (source) {
-            is AuraVideo.VideoStreamSource.Single -> {
-                if (part == VideoDownloadKeys.PART_AUDIO) {
-                    error("A muxed stream has no audio-only part to fetch")
-                }
-                source.url
-            }
-
-            is AuraVideo.VideoStreamSource.Merged -> when (part) {
-                VideoDownloadKeys.PART_AUDIO -> source.audioUrl
-                else -> source.videoUrl
-            }
-        }
-    }
-
     fun getDownload(songId: String): Flow<Download?> =
         downloads.map { it[songId] }.distinctUntilChanged()
 
     fun release() {
         scope.cancel()
-    }
-
-    private companion object {
-        /**
-         * How long a resolved video URL is reused. Long enough that one download never
-         * re-resolves mid-transfer, short enough that a download left paused for days
-         * picks up an unexpired URL.
-         */
-        const val VIDEO_URL_TTL_MS = 6 * 60 * 60 * 1000L
     }
 }

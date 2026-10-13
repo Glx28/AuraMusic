@@ -57,6 +57,7 @@
     <string name="video_download">Download</string>
     <string name="video_downloading">Downloading</string>
     <string name="video_download_failed">Download failed - tap to retry</string>
+    <string name="video_download_complete">Downloaded</string>
     <string name="downloads_music">Music</string>
     <string name="downloads_videos">Videos</string>
     <string name="video_downloads_audio">Downloaded music</string>

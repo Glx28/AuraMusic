@@ -6,10 +6,8 @@
 package com.auramusic.app.playback
 
 import android.app.Notification
-import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.graphics.drawable.Icon
 import androidx.media3.common.util.NotificationUtil
 import androidx.media3.common.util.Util
 import androidx.media3.exoplayer.offline.Download
@@ -47,34 +45,27 @@ class ExoDownloadService : DownloadService(
 
     override fun getScheduler(): Scheduler = PlatformScheduler(this, JOB_ID)
 
+    /**
+     * One notification for everything in flight.
+     *
+     * It used to carry a cancel action of its own, on top of whatever the platform's
+     * helper had already put there - which is where the row of identical cancel buttons
+     * came from. The helper's notification says what is happening and how far along it
+     * is; a download is stopped from the queue it is in, where the whole of it is
+     * visible, rather than from a notification about one of several.
+     */
     override fun getForegroundNotification(
         downloads: MutableList<Download>,
         notMetRequirements: Int
     ): Notification =
-        Notification.Builder.recoverBuilder(
-            this, downloadUtil.downloadNotificationHelper.buildProgressNotification(
-                this,
-                R.drawable.download,
-                null,
-                downloadLabel(this, downloads),
-                downloads,
-                notMetRequirements
-            )
-        ).addAction(
-            Notification.Action.Builder(
-                Icon.createWithResource(this, R.drawable.close),
-                getString(android.R.string.cancel),
-                PendingIntent.getService(
-                    this,
-                    0,
-                    Intent(this, ExoDownloadService::class.java).setAction(
-                        REMOVE_ALL_PENDING_DOWNLOADS
-                    ),
-                    PendingIntent.FLAG_IMMUTABLE
-                )
-            ).build()
-        ).build()
-
+        downloadUtil.downloadNotificationHelper.buildProgressNotification(
+            this,
+            R.drawable.download,
+            null,
+            downloadLabel(this, downloads),
+            downloads,
+            notMetRequirements,
+        )
 
     /**
      * This helper will outlive the lifespan of a single instance of [ExoDownloadService]

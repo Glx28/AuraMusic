@@ -2323,7 +2323,7 @@ private fun DownloadActionButton() {
             onDismiss = { showDownloadDialog = false },
             onRemove = { download ->
                 showDownloadDialog = false
-                VideoDownloadStore.get(context).remove(download.videoId)
+                VideoDownloadStore.cancel(context, download.videoId)
             },
             onDownload = { quality, codec ->
                 val id = videoId ?: return@VideoDownloadDialog
@@ -2338,15 +2338,20 @@ private fun DownloadActionButton() {
                         downloadError = true
                         return@launch
                     }
-                    VideoDownloadStore.get(context).download(
-                        videoId = id,
-                        title = session?.title.orEmpty(),
-                        channelName = session?.channelName.orEmpty(),
-                        thumbnailUrl = session?.videoThumbnail,
-                        source = source,
-                        quality = quality,
-                        codec = codec,
-                        durationMs = VideoPlaybackManager.uiState.value.durationMs,
+                    // The record of what was asked for is written by the store before
+                    // the service is started, so a transfer that outlives this process
+                    // still knows what it is fetching and can say so.
+                    VideoDownloadStore.download(
+                        context,
+                        VideoDownloadStore.Request(
+                            videoId = id,
+                            title = session?.title.orEmpty(),
+                            channelName = session?.channelName.orEmpty(),
+                            thumbnailUrl = session?.videoThumbnail,
+                            quality = quality,
+                            codec = codec,
+                            durationMs = VideoPlaybackManager.uiState.value.durationMs,
+                        ),
                     )
                 }
             },

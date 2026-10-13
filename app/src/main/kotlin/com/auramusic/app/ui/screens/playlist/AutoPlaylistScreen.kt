@@ -617,7 +617,7 @@ fun AutoPlaylistScreen(
                         PendingVideoRow(
                             pending = pending,
                             onRetry = { VideoDownloadStore.retry(context, pending.videoId) },
-                            onRemove = { VideoDownloadStore.get(context).remove(pending.videoId) },
+                            onRemove = { VideoDownloadStore.cancel(context, pending.videoId) },
                             modifier = Modifier.animateItem(),
                         )
                     }
@@ -636,7 +636,7 @@ fun AutoPlaylistScreen(
                                     ),
                                 )
                             },
-                            onRemove = { VideoDownloadStore.get(context).remove(download.videoId) },
+                            onRemove = { VideoDownloadStore.cancel(context, download.videoId) },
                             modifier = Modifier.animateItem(),
                         )
                     }
