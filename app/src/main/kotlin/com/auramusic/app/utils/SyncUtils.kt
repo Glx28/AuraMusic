@@ -115,6 +115,13 @@ class SyncUtils @Inject constructor(
         private const val MAX_RETRIES = 3
         private const val INITIAL_RETRY_DELAY_MS = 1000L
         private const val DB_OPERATION_DELAY_MS = 50L
+
+        /**
+         * Pages followed when reading the liked-songs playlist. A thousand likes is
+         * ten pages; the headroom is for accounts much larger than that, and the cap is
+         * there so a continuation that never ends cannot hold the sync open forever.
+         */
+        private const val MAX_LIKED_SONG_PAGES = 30
     }
 
     init {
@@ -427,6 +434,31 @@ class SyncUtils @Inject constructor(
         }
     }
 
+    /**
+     * Every liked song, not just the first page.
+     *
+     * An account with a thousand likes holds many more than a single page, and only
+     * reading the first left the rest of the library silently missing - which looks
+     * exactly like the sync not having run. Pages are followed until the playlist runs
+     * out or the cap is reached; the cap exists so a broken continuation cannot spin
+     * forever.
+     */
+    private suspend fun fetchAllLikedSongs(): Result<List<SongItem>> {
+        val first = YouTube.playlist(YouTube.LIKED_SONGS_ID).getOrThrow()
+        val songs = first.songs.toMutableList()
+        var continuation = first.continuation
+        var pages = 1
+        while (!continuation.isNullOrBlank() && pages < MAX_LIKED_SONG_PAGES) {
+            val next = YouTube.playlistContinuation(continuation).getOrNull() ?: break
+            if (next.songs.isEmpty()) break
+            songs += next.songs
+            continuation = next.continuation
+            pages++
+        }
+        Timber.d("Fetched ${songs.size} liked songs over $pages page(s)")
+        return Result.success(songs)
+    }
+
     private suspend fun executeSyncLikedSongs() = withContext(Dispatchers.IO) {
         if (!isLoggedIn()) {
             Timber.w("Skipping syncLikedSongs - user not logged in")
@@ -436,11 +468,10 @@ class SyncUtils @Inject constructor(
         updateState { copy(likedSongs = SyncStatus.Syncing, currentOperation = "Syncing liked songs") }
 
         withRetry {
-            YouTube.playlist("LM").completed()
+            fetchAllLikedSongs()
         }.onSuccess { result ->
-            result.onSuccess { page ->
+            result.onSuccess { remoteSongs ->
                 try {
-                    val remoteSongs = page.songs
                     val remoteIds = remoteSongs.map { it.id }.toSet()
                     val localSongs = database.likedSongsByNameAsc().first()
 

@@ -703,10 +703,17 @@ object YouTube {
         }
     }
 
+    /** Browse id of the account's liked-songs playlist. */
+    const val LIKED_SONGS_ID = "LM"
+
     suspend fun playlist(playlistId: String): Result<PlaylistPage> = runCatching {
         val response = innerTube.browse(
             client = WEB_REMIX,
-            browseId = "VL$playlistId",
+            // "LM" is the browse id of the liked-songs playlist in its own right; the
+            // "VL" prefix belongs to PL... playlist ids. Prefixing it asked for "VLLM",
+            // which answers with a valid but empty page - so a signed-in user with a
+            // thousand likes saw an empty library and no error to explain it.
+            browseId = if (playlistId == LIKED_SONGS_ID) playlistId else "VL$playlistId",
             setLogin = true
         ).body<BrowseResponse>()
         val base = response.contents?.twoColumnBrowseResultsRenderer?.tabs?.firstOrNull()?.tabRenderer?.content?.sectionListRenderer?.contents?.firstOrNull()
