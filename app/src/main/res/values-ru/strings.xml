@@ -1133,4 +1133,5 @@
     <string name="video_codec">Кодек</string>
     <string name="video_codec_hint">Если устройство не поддерживает аппаратное декодирование используемого кодека, воспроизведение будет прерываться. Если вы не знаете, какой вариант выбрать, оставьте настройку в положении «Авто».</string>
     <string name="video_download_format">%1$s · %2$s</string>
+    <string name="video_download">Скачать</string>
 </resources>
