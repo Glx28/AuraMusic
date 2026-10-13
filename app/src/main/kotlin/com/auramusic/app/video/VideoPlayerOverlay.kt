@@ -129,6 +129,8 @@ import com.auramusic.app.constants.VideoQuality
 import com.auramusic.app.subtitles.SubtitleLanguageOptions
 import com.auramusic.app.ui.component.ChannelAvatarStack
 import com.auramusic.app.ui.component.ChannelPickerDialog
+import com.auramusic.app.utils.AuraPlayerUtils
+import com.auramusic.app.video.VideoDownloadStore
 import com.auramusic.app.utils.linkifiedText
 import com.auramusic.app.utils.rememberPreference
 import com.auramusic.app.video.VideoPlaybackManager.CommentItem
@@ -1789,12 +1791,17 @@ private fun ActionButtonsRow(
     likeCountText: String?,
 ) {
     val context = LocalContext.current
-    var menuOpen by remember { mutableStateOf(false) }
     var showPlaylistDialog by remember { mutableStateOf(false) }
 
+    // One scrollable line. These were weighted buttons sharing the available width,
+    // which squeezed the labels until they were unreadable and left no room for
+    // anything else; now each keeps its natural size and the row scrolls sideways.
     Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         ActionButton(
             icon = R.drawable.ic_thumb_up,
@@ -1804,74 +1811,41 @@ private fun ActionButtonsRow(
             },
             selected = isLiked,
             onClick = { VideoPlaybackManager.toggleLike() },
-            modifier = Modifier.weight(1f)
         )
         ActionButton(
             icon = R.drawable.ic_thumb_down,
             label = stringResource(R.string.video_player_dislike),
             selected = isDisliked,
             onClick = { VideoPlaybackManager.toggleDislike() },
-            modifier = Modifier.weight(1f)
         )
         ActionButton(
             icon = if (isSaved) R.drawable.library_add_check else R.drawable.library_add,
             label = stringResource(if (isSaved) R.string.video_player_saved else R.string.video_player_save),
             selected = isSaved,
             onClick = { VideoPlaybackManager.toggleSave() },
-            modifier = Modifier.weight(1f)
         )
-        Box {
-            Surface(
-                onClick = { menuOpen = true },
-                shape = RoundedCornerShape(22.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHighest,
-                modifier = Modifier.size(42.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        painter = painterResource(R.drawable.more_horiz),
-                        contentDescription = stringResource(R.string.video_player_share),
-                        modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            DropdownMenu(
-                expanded = menuOpen,
-                onDismissRequest = { menuOpen = false },
-            ) {
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.video_player_share)) },
-                    onClick = {
-                        menuOpen = false
-                        VideoPlaybackManager.shareVideo(context)
-                    },
-                    leadingIcon = {
-                        Icon(painterResource(R.drawable.share), contentDescription = null, modifier = Modifier.size(20.dp))
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.video_player_copy_link)) },
-                    onClick = {
-                        menuOpen = false
-                        VideoPlaybackManager.copyVideoLink(context)
-                    },
-                    leadingIcon = {
-                        Icon(painterResource(R.drawable.link), contentDescription = null, modifier = Modifier.size(20.dp))
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.video_player_add_to_playlist)) },
-                    onClick = {
-                        menuOpen = false
-                        showPlaylistDialog = true
-                    },
-                    leadingIcon = {
-                        Icon(painterResource(R.drawable.playlist_add), contentDescription = null, modifier = Modifier.size(20.dp))
-                    }
-                )
-            }
-        }
+        // Share, copy link and add to playlist used to sit behind an overflow dot, so
+        // they were three taps away and the row could not grow to hold them. They are
+        // buttons like the rest now.
+        ActionButton(
+            icon = R.drawable.share,
+            label = stringResource(R.string.video_player_share),
+            selected = false,
+            onClick = { VideoPlaybackManager.shareVideo(context) }
+        )
+        ActionButton(
+            icon = R.drawable.link,
+            label = stringResource(R.string.video_player_copy_link),
+            selected = false,
+            onClick = { VideoPlaybackManager.copyVideoLink(context) }
+        )
+        ActionButton(
+            icon = R.drawable.playlist_add,
+            label = stringResource(R.string.video_player_add_to_playlist),
+            selected = false,
+            onClick = { showPlaylistDialog = true }
+        )
+        DownloadActionButton()
     }
 
     if (showPlaylistDialog) {
@@ -1948,6 +1922,107 @@ private fun AddToPlaylistVideoDialog(
             }
         },
     )
+}
+
+/**
+ * Download control for the video on screen.
+ *
+ * Shows the real state of the download rather than a toggle that might lie: a progress
+ * bar while it fetches, the stored size once it is on the device, and a tap then removes
+ * it. The download plays from disk afterwards, so this is the same control for getting
+ * a video and for taking it back off the device.
+ */
+@Composable
+private fun DownloadActionButton() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val session = VideoPlaybackManager.uiState.collectAsState().value.session
+    val videoId = session?.videoId
+
+    LaunchedEffect(videoId) {
+        if (videoId != null) VideoDownloadStore.load(context)
+    }
+    val entries by VideoDownloadStore.entries.collectAsState()
+    val progressById by VideoDownloadStore.progress.collectAsState()
+
+    val entry = videoId?.let { id -> entries.firstOrNull { it.videoId == id } }
+    val progress = videoId?.let { progressById[it] }
+
+    when {
+        progress != null && !progress.done && !progress.failed -> {
+            val fraction = if (progress.totalBytes > 0) {
+                (progress.downloadedBytes.toFloat() / progress.totalBytes).coerceIn(0f, 1f)
+            } else {
+                0f
+            }
+            Surface(
+                shape = RoundedCornerShape(22.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                modifier = Modifier.height(42.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(horizontal = 14.dp),
+                ) {
+                    Box(
+                        modifier = Modifier.size(18.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            progress = { fraction },
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                    Text(
+                        text = "${(fraction * 100).toInt()}%",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        else -> {
+            val downloading = progress?.done == false && progress.failed == false
+            ActionButton(
+                icon = if (entry != null) R.drawable.check else R.drawable.download,
+                label = when {
+                    entry != null -> stringResource(R.string.video_downloaded, formatBytes(entry.sizeBytes))
+                    downloading -> stringResource(R.string.video_downloading)
+                    else -> stringResource(R.string.video_download)
+                },
+                selected = entry != null,
+                onClick = {
+                    val id = videoId ?: return@ActionButton
+                    scope.launch {
+                        if (entry != null) {
+                            VideoDownloadStore.remove(context, id)
+                        } else {
+                            val source = AuraPlayerUtils.getVideoStreamSource(id).getOrNull()
+                            if (source == null) return@launch
+                            VideoDownloadStore.download(
+                                context = context,
+                                videoId = id,
+                                title = session?.title.orEmpty(),
+                                channelName = session?.channelName.orEmpty(),
+                                thumbnailUrl = session?.videoThumbnail,
+                                source = source,
+                                durationMs = VideoPlaybackManager.uiState.value.durationMs,
+                            )
+                        }
+                    }
+                },
+            )
+        }
+    }
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0) return "0 MB"
+    val mb = bytes / (1024.0 * 1024.0)
+    return if (mb >= 1024) String.format("%.1f GB", mb / 1024.0) else String.format("%.0f MB", mb)
 }
 
 @Composable

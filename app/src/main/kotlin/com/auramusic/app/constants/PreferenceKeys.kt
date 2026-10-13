@@ -67,6 +67,12 @@ val VideoHistoryKey = stringPreferencesKey("videoHistoryJson")
  * after a restart - the server has its own KV cache, but a request is still a request.
  */
 val CanvasUrlCacheKey = stringPreferencesKey("canvasUrlCacheJson")
+/**
+ * Videos kept on the device: [{"id","t","c","th","f","pv","pa","mv","ma","h","b","d","at"}].
+ * The store writes this after every download so the shelf survives a restart without
+ * having to walk the files on disk first.
+ */
+val VideoDownloadsKey = stringPreferencesKey("videoDownloadsJson")
 val VideoSubscribedChannelsKey = stringPreferencesKey("videoSubscribedChannelsJson")
 val HidePlayerThumbnailKey = booleanPreferencesKey("hidePlayerThumbnail")
 val CropAlbumArtKey = booleanPreferencesKey("cropAlbumArt")

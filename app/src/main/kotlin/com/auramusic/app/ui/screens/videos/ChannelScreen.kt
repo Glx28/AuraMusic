@@ -801,7 +801,8 @@ private fun ChannelHeaderSection(
                         modifier = Modifier.padding(horizontal = 14.dp),
                     ) {
                         Icon(
-                            painter = painterResource(R.drawable.nav_bar),
+                            // A person, to match the artist it opens.
+                            painter = painterResource(R.drawable.person),
                             contentDescription = null,
                             modifier = Modifier.size(16.dp),
                             tint = MaterialTheme.colorScheme.onSurface,

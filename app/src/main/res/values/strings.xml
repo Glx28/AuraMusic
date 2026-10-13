@@ -54,6 +54,12 @@
     <string name="subscribe_needs_account">Sign in to subscribe to channels</string>
     <string name="subscribe_failed">Could not update your subscription</string>
     <string name="open_artist">Open artist</string>
+    <string name="video_download">Download</string>
+    <string name="video_downloading">Downloading</string>
+    <string name="video_downloaded">Downloaded • %1$s</string>
+    <string name="video_downloads">Video downloads</string>
+    <string name="no_video_downloads">No downloaded videos</string>
+    <string name="remove_download">Remove download</string>
     <string name="open_channel">Open channel</string>
     <string name="nav_bar_position">Navigation bar position</string>
     <string name="nav_bar_position_auto">Automatic: side rail when there is room</string>
@@ -237,7 +243,6 @@
     <string name="remove_all_from_library">Remove all from library</string>
     <string name="action_download">Download</string>
     <string name="downloading">Downloading</string>
-    <string name="remove_download">Remove download</string>
     <string name="import_playlist">Import playlist</string>
     <string name="add_to_playlist">Add to playlist</string>
     <string name="view_artist">View artist</string>

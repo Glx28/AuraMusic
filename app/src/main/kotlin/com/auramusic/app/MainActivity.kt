@@ -273,6 +273,10 @@ class MainActivity : ComponentActivity() {
                     listenTogetherManager.setPlayerConnection(playerConnection)
                     // The video side shares this player instead of owning one.
                     VideoPlaybackManager.attachSharedPlayer(playerConnection!!)
+                    // Downloads are consulted from deep inside playback, which has no
+                    // context of its own; this is the one place both can be reached.
+                    com.auramusic.app.utils.AuraPlayerUtils.currentContextForDownloads =
+                        applicationContext
                     // Read once at start what this device has liked and subscribed to, so
                     // a replayed video reads as liked and a subscribed channel reads as
                     // subscribed before any page has finished loading.

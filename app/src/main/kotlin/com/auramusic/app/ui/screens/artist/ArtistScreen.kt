@@ -153,6 +153,9 @@ fun ArtistScreen(
     val isPlaying by playerConnection.isEffectivelyPlaying.collectAsState()
     val mediaMetadata by playerConnection.mediaMetadata.collectAsState()
     val artistPage = viewModel.artistPage
+    // Set while the artist-to-channel link is being resolved, so the button can say so
+    // rather than appearing to do nothing.
+    var openingChannel by remember { mutableStateOf(false) }
     val libraryArtist by viewModel.libraryArtist.collectAsState()
     val librarySongs by viewModel.librarySongs.collectAsState()
     val libraryAlbums by viewModel.libraryAlbums.collectAsState()
@@ -384,6 +387,8 @@ fun ArtistScreen(
                                         )
                                     }
 
+                                    Spacer(modifier = Modifier.width(8.dp))
+
                                     // Straight to the same artist on the video side. The
                                     // channel id comes from the library when it is there
                                     // and from the artist page otherwise, so this works for
@@ -393,13 +398,35 @@ fun ArtistScreen(
                                     if (artistChannelId != null) {
                                         OutlinedButton(
                                             onClick = {
-                                                navController.navigate("youtube_channel/$artistChannelId")
+                                                // An artist's channel id is often an
+                                                // auto-generated one, which opens a
+                                                // generated page rather than the artist's.
+                                                // Resolved by name and subscriber count
+                                                // before leaving this screen.
+                                                coroutineScope.launch {
+                                                    openingChannel = true
+                                                    val resolved =
+                                                        com.auramusic.app.video.ArtistChannelResolver.resolve(
+                                                            artistName = libraryArtist?.artist?.name
+                                                                ?: artistPage?.artist?.title.orEmpty(),
+                                                            artistChannelId = artistChannelId,
+                                                            artistSubscribersText = artistPage?.subscriberCountText
+                                                                ?: libraryArtist?.artist?.subscriberCountText,
+                                                        )
+                                                    openingChannel = false
+                                                    resolved?.let {
+                                                        navController.navigate("youtube_channel/${it.channelId}")
+                                                    }
+                                                }
                                             },
                                             shape = RoundedCornerShape(50),
                                             modifier = Modifier.height(40.dp)
                                         ) {
                                             Icon(
-                                                painter = painterResource(R.drawable.slow_motion_video),
+                                                // The same mark the channel screen uses to
+                                                // step across to the artist, so the two
+                                                // buttons read as one pair.
+                                                painter = painterResource(R.drawable.person),
                                                 contentDescription = null,
                                                 modifier = Modifier.size(20.dp)
                                             )

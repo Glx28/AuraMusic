@@ -109,8 +109,11 @@ import com.auramusic.app.ui.menu.PlaylistMenu
 import com.auramusic.app.utils.rememberEnumPreference
 import com.auramusic.app.utils.rememberPreference
 import com.auramusic.app.viewmodels.LibraryMixViewModel
+import com.auramusic.app.video.VideoDownloadStore
 import com.auramusic.app.video.VideoPlaybackManager
+import com.auramusic.innertube.models.Thumbnail
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.Collator
 import java.time.LocalDateTime
@@ -159,6 +162,27 @@ fun LibraryMixScreen(
     }.collectAsState(initial = emptyList())
     // Which shelf the see-more grid is showing, if any.
     var expandedShelf by remember { mutableStateOf<Int?>(null) }
+    val coroutineScope = rememberCoroutineScope()
+
+    // Downloaded videos, read from the store so the shelf is the same list the player
+    // will play from.
+    LaunchedEffect(Unit) { VideoDownloadStore.load(context) }
+    val videoDownloads by VideoDownloadStore.entries.collectAsState()
+    val playDownload: (VideoDownloadStore.Entry) -> Unit = { entry ->
+        VideoPlaybackManager.playWithDetails(
+            context = context,
+            videoId = entry.videoId,
+            title = entry.title,
+            channelName = entry.channelName,
+            channelThumbnail = null,
+            thumbnails = listOfNotNull(
+                entry.thumbnailUrl?.let { Thumbnail(it, null, null) },
+            ),
+        )
+    }
+    val removeDownload: (VideoDownloadStore.Entry) -> Unit = { entry ->
+        coroutineScope.launch { VideoDownloadStore.remove(context, entry.videoId) }
+    }
     val playVideoEntry: (VideoPlaybackManager.VideoHistoryEntry) -> Unit = { entry ->
         VideoPlaybackManager.play(
             context = context,
@@ -275,7 +299,6 @@ fun LibraryMixScreen(
                 }
         }.reversed(sortDescending)
 
-    val coroutineScope = rememberCoroutineScope()
 
     val lazyListState = rememberLazyListState()
     val lazyGridState = rememberLazyGridState()
@@ -385,6 +408,9 @@ fun LibraryMixScreen(
                                  onPlayVideo = playVideoEntry,
                                  onOpenChannel = openVideoChannel,
                                  onSeeMore = { expandedShelf = it },
+                                 videoDownloads = videoDownloads,
+                                 onPlayDownload = playDownload,
+                                 onRemoveDownload = removeDownload,
                              )
                          }
                      }
@@ -712,6 +738,9 @@ fun LibraryMixScreen(
                                 onPlayVideo = playVideoEntry,
                                 onOpenChannel = openVideoChannel,
                                 onSeeMore = { expandedShelf = it },
+                                videoDownloads = videoDownloads,
+                                onPlayDownload = playDownload,
+                                onRemoveDownload = removeDownload,
                             )
                         }
                     }
@@ -1021,6 +1050,9 @@ private fun LibraryVideoSections(
     onPlayVideo: (VideoPlaybackManager.VideoHistoryEntry) -> Unit,
     onOpenChannel: (String) -> Unit,
     onSeeMore: (Int) -> Unit,
+    videoDownloads: List<VideoDownloadStore.Entry> = emptyList(),
+    onPlayDownload: (VideoDownloadStore.Entry) -> Unit = {},
+    onRemoveDownload: (VideoDownloadStore.Entry) -> Unit = {},
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         if (history.isNotEmpty()) {
@@ -1035,6 +1067,27 @@ private fun LibraryVideoSections(
                     VideoHistoryThumb(
                         entry = entry,
                         onClick = { onPlayVideo(entry) },
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+        // Downloads are listed separately from the other shelves: videos are files on
+        // the device rather than entries in the watch history, and mixing the two made
+        // both harder to read.
+        if (videoDownloads.isNotEmpty()) {
+            VideoLibrarySectionHeader(R.string.video_downloads) {
+                onSeeMore(R.string.video_downloads)
+            }
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(videoDownloads, key = { it.videoId }) { download ->
+                    VideoDownloadThumb(
+                        download = download,
+                        onClick = { onPlayDownload(download) },
+                        onRemove = { onRemoveDownload(download) },
                     )
                 }
             }
@@ -1058,6 +1111,89 @@ private fun LibraryVideoSections(
             Spacer(modifier = Modifier.height(8.dp))
         }
     }
+}
+
+/** One downloaded video on the shelf, with the size it occupies on the device. */
+@Composable
+private fun VideoDownloadThumb(
+    download: VideoDownloadStore.Entry,
+    onClick: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .width(170.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (!download.thumbnailUrl.isNullOrBlank()) {
+                AsyncImage(
+                    model = download.thumbnailUrl,
+                    contentDescription = download.title,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                )
+            }
+            Icon(
+                painter = painterResource(R.drawable.download),
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(6.dp)
+                    .size(16.dp),
+            )
+            // Removing is a deliberate act, so it gets its own control rather than
+            // making a long press on the tile do something unexpected.
+            Surface(
+                onClick = onRemove,
+                shape = CircleShape,
+                color = Color.Black.copy(alpha = 0.45f),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(4.dp)
+                    .size(22.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        painter = painterResource(R.drawable.close),
+                        contentDescription = stringResource(R.string.remove_download),
+                        tint = Color.White,
+                        modifier = Modifier.size(12.dp),
+                    )
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = download.title,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            text = formatDownloadSize(download.sizeBytes),
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+        )
+    }
+}
+
+private fun formatDownloadSize(bytes: Long): String {
+    if (bytes <= 0) return "0 MB"
+    val mb = bytes / (1024.0 * 1024.0)
+    return if (mb >= 1024) String.format("%.1f GB", mb / 1024.0) else String.format("%.0f MB", mb)
 }
 
 @Composable

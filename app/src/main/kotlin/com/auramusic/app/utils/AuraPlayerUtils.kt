@@ -1,5 +1,6 @@
 package com.auramusic.app.utils
 
+import android.content.Context
 import com.auramusic.app.constants.VideoQuality
 import com.auramusic.auravideo.AuraVideo
 import com.auramusic.auravideo.AuraVideo.VideoStreamResult
@@ -11,6 +12,13 @@ import timber.log.Timber
 
 object AuraPlayerUtils {
     private const val logTag = "AuraPlayerUtils"
+
+    /**
+     * Application context, set once at start-up so downloads can be consulted without
+     * threading a context through every playback entry point.
+     */
+    @Volatile
+    var currentContextForDownloads: Context? = null
 
     /**
      * Set the preferred video quality before fetching video URLs
@@ -51,6 +59,16 @@ object AuraPlayerUtils {
      */
     suspend fun getVideoStreamSource(videoId: String): Result<AuraVideo.VideoStreamSource> =
         withContext(Dispatchers.IO) {
+            // A downloaded video is played from disk. Checked first, so this holds for
+            // every route into playback - opening it, resuming it, autoplay - and costs
+            // nothing on a video that was never downloaded.
+            currentContextForDownloads?.let { ctx ->
+                com.auramusic.app.video.VideoDownloadStore.load(ctx)
+                com.auramusic.app.video.VideoDownloadStore.localSource(ctx, videoId)?.let { local ->
+                    Timber.tag(logTag).d("AuraPlayerUtils: Playing downloaded video $videoId from disk")
+                    return@withContext Result.success(local)
+                }
+            }
             Timber.tag(logTag).d("AuraPlayerUtils: Resolving stream source for videoId: $videoId")
             AuraVideo.getVideoStreamSource(videoId).also { result ->
                 result.onSuccess { source ->
