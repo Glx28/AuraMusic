@@ -67,7 +67,6 @@ import androidx.navigation.NavController
 import android.widget.Toast
 import coil3.compose.AsyncImage
 import com.auramusic.app.LocalPlayerAwareWindowInsets
-import com.auramusic.app.LocalDatabase
 import com.auramusic.app.R
 import com.auramusic.app.utils.VideoThumbnails
 import com.auramusic.app.utils.compactViewCount
@@ -112,9 +111,6 @@ fun ChannelScreen(
     var videos by remember(channelId) { mutableStateOf<List<YouTubeVideoItem>>(emptyList()) }
     var channelListView by remember { mutableStateOf(false) }
     var subscribeError by remember { mutableStateOf<String?>(null) }
-    // The library artist behind this channel, when there is one. A channel id is an
-    // exact match; the name is only a fallback, because two channels can share it.
-    var linkedArtistId by remember { mutableStateOf<String?>(null) }
     var continuation by remember(channelId) { mutableStateOf<String?>(null) }
     var posts by remember(channelId) { mutableStateOf<List<YouTubeChannelPost>>(emptyList()) }
     var postsContinuation by remember(channelId) { mutableStateOf<String?>(null) }
@@ -337,16 +333,6 @@ fun ChannelScreen(
         VideoPlaybackManager.primeSubscribedChannels(context)
     }
 
-    val database = LocalDatabase.current
-    LaunchedEffect(header?.title, resolvedChannelId, header?.channelId) {
-        val channelId = header?.channelId ?: resolvedChannelId.takeIf { it.isNotBlank() }
-        val title = header?.title.orEmpty()
-        if (channelId == null || title.isBlank()) return@LaunchedEffect
-        linkedArtistId = withContext(Dispatchers.IO) {
-            database.artistEntityByChannelId(channelId)?.id
-                ?: database.artistEntityByName(title)?.id
-        }
-    }
     val sharedSubscriptions by VideoPlaybackManager.subscribedChannelIds.collectAsState()
     LaunchedEffect(sharedSubscriptions, resolvedChannelId) {
         if (resolvedChannelId.isNotBlank() && sharedSubscriptions.contains(resolvedChannelId)) {
@@ -404,9 +390,11 @@ fun ChannelScreen(
                 isSubscribed = isSubscribed,
                 isSubscribing = isSubscribing,
                 subscribeError = subscribeError,
-                linkedArtistId = linkedArtistId,
                 onOpenArtist = {
-                    linkedArtistId?.let { navController.navigate("artist/$it") }
+                    // The artist page is keyed by this same id, so it resolves for any
+                    // channel whether or not the artist happens to be in the library.
+                    val channelId = header?.channelId ?: resolvedChannelId
+                    if (channelId.isNotBlank()) navController.navigate("artist/$channelId")
                 },
                 onSubscribeClick = { toggleSubscribe() },
             )
@@ -616,7 +604,6 @@ private fun ChannelHeaderSection(
     isSubscribed: Boolean,
     isSubscribing: Boolean,
     subscribeError: String?,
-    linkedArtistId: String?,
     onOpenArtist: () -> Unit,
     onSubscribeClick: () -> Unit,
 ) {
@@ -757,13 +744,19 @@ private fun ChannelHeaderSection(
                     }
                 }
             }
+            // Subscribe and the jump to the artist side sit together: they were siblings
+            // in the column, which put the second one on its own line below.
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            ) {
             Surface(
                 onClick = onSubscribeClick,
                 enabled = !isSubscribing,
                 shape = RoundedCornerShape(22.dp),
                 color = if (isSubscribed) MaterialTheme.colorScheme.surfaceContainerHighest
                 else MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp).height(38.dp),
+                modifier = Modifier.height(38.dp),
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -795,10 +788,8 @@ private fun ChannelHeaderSection(
                     )
                 }
             }
-            // The same artist on the music side is one tap away when the library knows
-            // this channel - the two screens hold the same artist under different keys.
-            if (linkedArtistId != null) {
-                Spacer(Modifier.width(8.dp))
+            // The same artist on the music side, one tap away. Not conditional on the
+            // library: the artist page opens straight from this channel's id.
                 Surface(
                     onClick = onOpenArtist,
                     shape = RoundedCornerShape(22.dp),
