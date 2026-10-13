@@ -14,6 +14,7 @@ import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.offline.DownloadService
 import com.auramusic.app.constants.VideoCodec
 import com.auramusic.app.constants.VideoDownloadsKey
+import com.auramusic.app.constants.VideoDownloadsPendingKey
 import com.auramusic.app.constants.VideoQuality
 import com.auramusic.app.di.VideoDownloadStoreEntryPoint
 import com.auramusic.app.playback.DownloadUtil
@@ -85,6 +86,24 @@ class VideoDownloadStore @Inject constructor(
         val downloadedAt: Long,
     )
 
+    /**
+     * A download that has been asked for but has not arrived.
+     *
+     * Kept separately from [Entry] because the two answer different questions: an entry
+     * is something that can be played, this is something that is on its way. Only the
+     * first is playable, but a video that is downloading has to be visible somewhere -
+     * otherwise the wait has no face, and the shelf looks empty for the whole of it.
+     */
+    data class Pending(
+        val videoId: String,
+        val title: String,
+        val channelName: String,
+        val thumbnailUrl: String?,
+        /** 0 to 1, or null when the stream does not report a length to measure against. */
+        val fraction: Float?,
+        val failed: Boolean,
+    )
+
     /** Progress of an in-flight download, keyed by video id. */
     data class Progress(
         val videoId: String,
@@ -94,7 +113,31 @@ class VideoDownloadStore @Inject constructor(
         val failed: Boolean,
     )
 
+    /** What each in-flight video is and what it needs, until it is complete. */
+    private data class Record(
+        val videoId: String,
+        val title: String,
+        val channelName: String,
+        val thumbnailUrl: String?,
+        val parts: List<String>,
+        val videoMimeType: String?,
+        val audioMimeType: String?,
+        val height: Int,
+        val quality: VideoQuality,
+        val codec: VideoCodec,
+        val durationMs: Long,
+    ) {
+        /** What the notification should say about it. */
+        val label: String
+            get() = when {
+                title.isBlank() -> channelName
+                channelName.isBlank() -> title
+                else -> "$title \u2022 $channelName"
+            }
+    }
+
     private val _entries = MutableStateFlow<List<Entry>>(emptyList())
+    private val _records = MutableStateFlow<Map<String, Record>>(emptyMap())
     private val _progress = MutableStateFlow<Map<String, Progress>>(emptyMap())
     private val _loaded = MutableStateFlow(false)
 
@@ -113,6 +156,15 @@ class VideoDownloadStore @Inject constructor(
                         if (download.state == Download.STATE_COMPLETED) {
                             completePart(parsed, download)
                         } else if (download.state == Download.STATE_FAILED) {
+                            // A video download that stops has to say why: this is the
+                            // only place the reason exists, and without it a failed
+                            // download is indistinguishable from one that was cancelled.
+                            Timber.tag("VideoDownloads").w(
+                                "Download failed for %s (%s): %s",
+                                parsed.videoId,
+                                parsed.part,
+                                finalException?.toString() ?: "no reason given",
+                            )
                             _progress.value = _progress.value + (
                                 parsed.videoId to Progress(
                                     videoId = parsed.videoId,
@@ -141,6 +193,7 @@ class VideoDownloadStore @Inject constructor(
         if (_loaded.value) return
         withContext(Dispatchers.IO) {
             _entries.value = parse(context.dataStore.get(VideoDownloadsKey))
+            _records.value = parseRecords(context.dataStore.get(VideoDownloadsPendingKey))
             _loaded.value = true
         }
         // A video whose download finished while the process was gone is complete but
@@ -259,30 +312,70 @@ class VideoDownloadStore @Inject constructor(
             )
         }
 
-        val payload = org.json.JSONObject().apply {
-            put("id", videoId)
-            put("t", title)
-            put("c", channelName)
-            put("th", thumbnailUrl ?: "")
-            put("d", durationMs)
-            put("h", (source as? AuraVideo.VideoStreamSource.Merged)?.height ?: 0)
-            put("mv", parts.first { it.part != VideoDownloadKeys.PART_AUDIO }.mimeType)
-            put("ma", parts.firstOrNull { it.part == VideoDownloadKeys.PART_AUDIO }?.mimeType ?: "")
-            put("q", quality.name)
-            put("k", codec.name)
-            put("p", parts.joinToString(",") { it.part })
-        }.toString()
+        val record = Record(
+            videoId = videoId,
+            title = title,
+            channelName = channelName,
+            thumbnailUrl = thumbnailUrl,
+            parts = parts.map { it.part },
+            videoMimeType = parts.first { it.part != VideoDownloadKeys.PART_AUDIO }.mimeType,
+            audioMimeType = parts.firstOrNull { it.part == VideoDownloadKeys.PART_AUDIO }?.mimeType,
+            height = (source as? AuraVideo.VideoStreamSource.Merged)?.height ?: 0,
+            quality = quality,
+            codec = codec,
+            durationMs = durationMs,
+        )
+        // Recorded before the transfer starts, because the transfer belongs to a service
+        // that may outlive this process - and what arrives when it does has to be able
+        // to say what it is.
+        _records.value = _records.value + (videoId to record)
 
-        parts.forEach { part ->
-            val key = VideoDownloadKeys.key(videoId, part.part, quality, codec)
-            val request = DownloadRequest.Builder(key, Uri.parse(part.url))
-                .setCustomCacheKey(key)
-                .setMimeType(part.mimeType)
-                .setData(payload.toByteArray())
-                .build()
-            // Not foregrounded: the download service already holds the notification for
-            // everything in flight, and asking for a second one here would replace it.
-            DownloadService.sendAddDownload(context, ExoDownloadService::class.java, request, false)
+        scope.launch {
+            persistRecords()
+            parts.forEach { part ->
+                val key = VideoDownloadKeys.key(videoId, part.part, quality, codec)
+                val request = DownloadRequest.Builder(key, Uri.parse(part.url))
+                    .setCustomCacheKey(key)
+                    .setMimeType(part.mimeType)
+                    // What the download service reads straight into the notification.
+                    // It used to carry the whole record, which meant the notification
+                    // showed a page of fields in place of a title.
+                    .setData(record.label.toByteArray())
+                    .build()
+                // Not foregrounded: the download service already holds the notification
+                // for everything in flight, and asking for a second one replaces it.
+                DownloadService.sendAddDownload(context, ExoDownloadService::class.java, request, false)
+            }
+        }
+    }
+
+    /**
+     * Starts a failed download again, at the quality and codec it was asked for.
+     *
+     * Re-resolved rather than replayed: the URLs a failed attempt was given expire, and
+     * a restart that reuses them fails again for the same reason and looks like the app
+     * refusing to try.
+     */
+    fun retry(videoId: String, onFailed: () -> Unit = {}) {
+        val record = _records.value[videoId] ?: return
+        scope.launch {
+            val source = com.auramusic.app.utils.AuraPlayerUtils
+                .getVideoStreamSource(videoId, record.quality, record.codec)
+                .getOrNull()
+            if (source == null) {
+                onFailed()
+                return@launch
+            }
+            download(
+                videoId = record.videoId,
+                title = record.title,
+                channelName = record.channelName,
+                thumbnailUrl = record.thumbnailUrl,
+                source = source,
+                quality = record.quality,
+                codec = record.codec,
+                durationMs = record.durationMs,
+            )
         }
     }
 
@@ -300,8 +393,10 @@ class VideoDownloadStore @Inject constructor(
         }
         scope.launch {
             _entries.value = _entries.value.filterNot { it.videoId == videoId }
+            _records.value = _records.value - videoId
             _progress.value = _progress.value - videoId
             persist()
+            persistRecords()
             publishProgress()
         }
     }
@@ -314,59 +409,53 @@ class VideoDownloadStore @Inject constructor(
      * still growing.
      */
     private suspend fun completePart(parsed: VideoDownloadKeys.Parsed, download: Download) {
-        val payload = runCatching {
-            org.json.JSONObject(String(download.request.data ?: ByteArray(0)))
-        }.getOrNull() ?: return
-
-        val parts = payload.optJSONArray("p")?.let { array ->
-            (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotEmpty) }
-        }.orEmpty()
-        if (parts.isEmpty() || parsed.part !in parts) return
+        val record = _records.value[parsed.videoId] ?: return
+        if (parsed.part !in record.parts) return
 
         val index = downloadUtil.downloadManager.downloadIndex
-        val sizes = parts.associateWith { part ->
-            val key = VideoDownloadKeys.key(parsed.videoId, part, parsed.quality, parsed.codec)
+        val sizes = record.parts.associateWith { part ->
+            val key = VideoDownloadKeys.key(record.videoId, part, record.quality, record.codec)
             val state = runCatching { index.getDownload(key) }.getOrNull()
             state?.takeIf { it.state == Download.STATE_COMPLETED }?.contentLength ?: 0L
         }
-        // Every part present at its full length: anything less is still arriving.
+        // Every part present at its full length: anything less is still arriving, and a
+        // record written early would send the player to a file that is still growing.
         if (sizes.values.any { it <= 0L }) return
-        if (parts.any { part ->
-                val key = VideoDownloadKeys.key(parsed.videoId, part, parsed.quality, parsed.codec)
+        if (record.parts.any { part ->
+                val key = VideoDownloadKeys.key(record.videoId, part, record.quality, record.codec)
                 cachedFile(key, sizes[part] ?: 0L) == null
             }
         ) {
             return
         }
 
-        val videoPart = VideoDownloadKeys.PART_VIDEO.takeIf { it in parts } ?: VideoDownloadKeys.PART_MUXED
+        val videoPart = VideoDownloadKeys.PART_VIDEO.takeIf { it in record.parts } ?: VideoDownloadKeys.PART_MUXED
         val entry = Entry(
-            videoId = parsed.videoId,
-            title = payload.optString("t"),
-            channelName = payload.optString("c"),
-            thumbnailUrl = payload.optString("th").takeIf { it.isNotEmpty() },
-            videoKey = VideoDownloadKeys.key(parsed.videoId, videoPart, parsed.quality, parsed.codec),
-            audioKey = if (VideoDownloadKeys.PART_AUDIO in parts) {
-                VideoDownloadKeys.key(parsed.videoId, VideoDownloadKeys.PART_AUDIO, parsed.quality, parsed.codec)
+            videoId = record.videoId,
+            title = record.title,
+            channelName = record.channelName,
+            thumbnailUrl = record.thumbnailUrl,
+            videoKey = VideoDownloadKeys.key(record.videoId, videoPart, record.quality, record.codec),
+            audioKey = if (VideoDownloadKeys.PART_AUDIO in record.parts) {
+                VideoDownloadKeys.key(record.videoId, VideoDownloadKeys.PART_AUDIO, record.quality, record.codec)
             } else {
                 null
             },
-            videoMimeType = payload.optString("mv").takeIf { it.isNotEmpty() },
-            audioMimeType = payload.optString("ma").takeIf { it.isNotEmpty() },
+            videoMimeType = record.videoMimeType,
+            audioMimeType = record.audioMimeType,
             videoBytes = sizes[videoPart] ?: 0L,
             audioBytes = sizes[VideoDownloadKeys.PART_AUDIO] ?: 0L,
-            height = payload.optInt("h"),
-            quality = parsed.quality,
-            codec = parsed.codec,
+            height = record.height,
+            quality = record.quality,
+            codec = record.codec,
             sizeBytes = sizes.values.sum(),
-            durationMs = payload.optLong("d"),
+            durationMs = record.durationMs,
             downloadedAt = System.currentTimeMillis(),
         )
         _entries.value = listOf(entry) + _entries.value.filterNot { it.videoId == entry.videoId }
-        _progress.value = _progress.value + (
-            entry.videoId to Progress(entry.videoId, entry.sizeBytes, entry.sizeBytes, done = true, failed = false)
-            )
+        _records.value = _records.value - entry.videoId
         persist()
+        persistRecords()
     }
 
     /**
@@ -390,9 +479,20 @@ class VideoDownloadStore @Inject constructor(
                 failed = downloads.any { it.state == Download.STATE_FAILED },
             )
         }
-        // Keep the finished state visible for a video whose downloads have left the
-        // manager's active list; without it the tile would drop its "downloaded" label.
-        _progress.value = _progress.value.mapValues { (id, old) -> next[id] ?: old } + next
+        // Built from what is finished plus what is in flight, rather than from the last
+        // map with entries merged in. Carrying entries forward is what left a download
+        // that had failed or been cancelled reporting the progress it had reached when
+        // it stopped - frozen at zero, as though it were still on its way.
+        _progress.value =
+            _entries.value.associate { entry ->
+                entry.videoId to Progress(
+                    videoId = entry.videoId,
+                    downloadedBytes = entry.sizeBytes,
+                    totalBytes = entry.sizeBytes,
+                    done = true,
+                    failed = false,
+                )
+            } + next
     }
 
     private suspend fun persist() {
@@ -422,6 +522,80 @@ class VideoDownloadStore @Inject constructor(
             }
             runCatching { context.dataStore.edit { it[VideoDownloadsKey] = array.toString() } }
         }
+    }
+
+    /** Downloads still on their way, as the shelves show them. */
+    fun pending(): List<Pending> = _records.value.values.map { record ->
+        val progress = _progress.value[record.videoId]
+        Pending(
+            videoId = record.videoId,
+            title = record.title,
+            channelName = record.channelName,
+            thumbnailUrl = record.thumbnailUrl,
+            // Left out entirely when there is no length to measure against: a ring that
+            // jumps about between ticks is worse than one that simply turns.
+            fraction = progress
+                ?.takeIf { it.totalBytes > 0 && !it.done && !it.failed }
+                ?.let { (it.downloadedBytes.toFloat() / it.totalBytes).coerceIn(0f, 1f) },
+            failed = progress?.failed == true,
+        )
+    }
+
+    private suspend fun persistRecords() {
+        withContext(Dispatchers.IO) {
+            val array = org.json.JSONArray()
+            _records.value.values.forEach { record ->
+                array.put(
+                    org.json.JSONObject().apply {
+                        put("id", record.videoId)
+                        put("t", record.title)
+                        put("c", record.channelName)
+                        put("th", record.thumbnailUrl ?: "")
+                        put("p", record.parts.joinToString(","))
+                        put("mv", record.videoMimeType ?: "")
+                        put("ma", record.audioMimeType ?: "")
+                        put("h", record.height)
+                        put("q", record.quality.name)
+                        put("k", record.codec.name)
+                        put("d", record.durationMs)
+                    },
+                )
+            }
+            runCatching { context.dataStore.edit { it[VideoDownloadsPendingKey] = array.toString() } }
+        }
+    }
+
+    private fun parseRecords(raw: String?): Map<String, Record> {
+        if (raw.isNullOrBlank()) return emptyMap()
+        val out = mutableMapOf<String, Record>()
+        runCatching {
+            val array = org.json.JSONArray(raw)
+            for (i in 0 until array.length()) {
+                val o = array.getJSONObject(i)
+                val videoId = o.optString("id")
+                val partsArray = o.optJSONArray("p")
+                val parts = (0 until (partsArray?.length() ?: 0)).mapNotNull {
+                    partsArray.optString(it).takeIf(String::isNotEmpty)
+                }
+                // A record whose parts are not listed cannot be turned into a finished
+                // entry, so there is no point keeping it.
+                if (videoId.isEmpty() || parts.isEmpty()) continue
+                out[videoId] = Record(
+                    videoId = videoId,
+                    title = o.optString("t"),
+                    channelName = o.optString("c"),
+                    thumbnailUrl = o.optString("th").takeIf { it.isNotEmpty() },
+                    parts = parts,
+                    videoMimeType = o.optString("mv").takeIf { it.isNotEmpty() },
+                    audioMimeType = o.optString("ma").takeIf { it.isNotEmpty() },
+                    height = o.optInt("h"),
+                    quality = VideoQuality.fromName(o.optString("q")),
+                    codec = VideoCodec.fromName(o.optString("k")),
+                    durationMs = o.optLong("d"),
+                )
+            }
+        }
+        return out
     }
 
     private fun parse(raw: String?): List<Entry> {
@@ -506,6 +680,14 @@ class VideoDownloadStore @Inject constructor(
 
         fun progressFor(context: Context, videoId: String): Progress? =
             get(context).progressFor(videoId)
+
+        fun pending(context: Context): List<Pending> = get(context).pending()
+
+        fun retry(context: Context, videoId: String, onFailed: () -> Unit = {}) =
+            get(context).retry(videoId, onFailed)
+
+        fun download(context: Context, videoId: String, title: String, channelName: String, thumbnailUrl: String?, source: AuraVideo.VideoStreamSource, quality: VideoQuality, codec: VideoCodec, durationMs: Long) =
+            get(context).download(videoId, title, channelName, thumbnailUrl, source, quality, codec, durationMs)
     }
 }
 

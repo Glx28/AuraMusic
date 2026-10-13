@@ -73,6 +73,16 @@ val CanvasUrlCacheKey = stringPreferencesKey("canvasUrlCacheJson")
  * having to walk the files on disk first.
  */
 val VideoDownloadsKey = stringPreferencesKey("videoDownloadsJson")
+
+/**
+ * Downloads that have been asked for but have not arrived.
+ *
+ * Kept apart from the finished list because the transfer belongs to a service that can
+ * outlive the process, so what it is fetching has to survive on disk rather than in
+ * memory - otherwise a download that resumes after the app is reopened has no way to
+ * say what it is.
+ */
+val VideoDownloadsPendingKey = stringPreferencesKey("videoDownloadsPendingJson")
 val VideoSubscribedChannelsKey = stringPreferencesKey("videoSubscribedChannelsJson")
 val HidePlayerThumbnailKey = booleanPreferencesKey("hidePlayerThumbnail")
 val CropAlbumArtKey = booleanPreferencesKey("cropAlbumArt")

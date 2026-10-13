@@ -30,6 +30,10 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.delay
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -168,6 +172,23 @@ fun LibraryMixScreen(
     // will play from.
     LaunchedEffect(Unit) { VideoDownloadStore.load(context) }
     val videoDownloads by VideoDownloadStore.entries(context).collectAsState()
+    // Rebuilt on a slow beat while anything is in flight: the store publishes progress
+    // for each video rather than a list of what is downloading, so something has to ask
+    // again for the list to move.
+    val downloadTick by produceState(0L) {
+        while (true) {
+            delay(1_000)
+            value++
+        }
+    }
+    // Downloads still on their way are shown alongside finished ones. A video that is
+    // downloading has to be visible while it downloads, or the wait has no face and the
+    // shelf looks empty for the whole of it.
+    val pendingDownloads = remember(downloadTick, videoDownloads) {
+        VideoDownloadStore.pending(context).filter { pending ->
+            videoDownloads.none { it.videoId == pending.videoId }
+        }
+    }
     val playDownload: (VideoDownloadStore.Entry) -> Unit = { entry ->
         VideoPlaybackManager.playWithDetails(
             context = context,
@@ -401,11 +422,13 @@ fun LibraryMixScreen(
                          key = "videoDownloadsSection",
                          contentType = CONTENT_TYPE_HEADER,
                      ) {
-                         LibraryVideoDownloadsSection(
-                             downloads = videoDownloads,
+                         LibraryDownloadSections(
+                             videoDownloads = videoDownloads,
+                             pendingDownloads = pendingDownloads,
                              onPlayDownload = playDownload,
-                             onRemoveDownload = removeDownload,
-                             onSeeMore = { expandedShelf = R.string.video_downloads },
+                             onRemoveDownload = { VideoDownloadStore.get(context).remove(it.videoId) },
+                             onCancelDownload = { VideoDownloadStore.get(context).remove(it.videoId) },
+                             onRetryDownload = { VideoDownloadStore.retry(context, it.videoId) },
                          )
                      }
 
@@ -741,11 +764,13 @@ fun LibraryMixScreen(
                             span = { GridItemSpan(maxLineSpan) },
                             contentType = CONTENT_TYPE_HEADER,
                         ) {
-                            LibraryVideoDownloadsSection(
-                                downloads = videoDownloads,
+                            LibraryDownloadSections(
+                                videoDownloads = videoDownloads,
+                                pendingDownloads = pendingDownloads,
                                 onPlayDownload = playDownload,
-                                onRemoveDownload = removeDownload,
-                                onSeeMore = { expandedShelf = R.string.video_downloads },
+                                onRemoveDownload = { VideoDownloadStore.get(context).remove(it.videoId) },
+                                onCancelDownload = { VideoDownloadStore.get(context).remove(it.videoId) },
+                                onRetryDownload = { VideoDownloadStore.retry(context, it.videoId) },
                             )
                         }
 
@@ -1065,36 +1090,152 @@ fun LibraryMixScreen(
 }
 
 /**
- * Downloaded videos, on their own shelf.
+ * Downloads, in two halves.
  *
- * Downloads used to sit inside the video shelves, which meant they were only reachable
- * once there was watch history or a subscription to sit them beside - so the videos
- * that were on the device and nothing else were the ones that could not be found. They
- * are their own thing here: files on the device rather than things watched.
+ * Songs and videos are both downloads and nothing about them is alike: one is a row in
+ * a list, the other is a picture on a shelf; one is copied out of the network, the
+ * other is kept by the download service. Listed together they read as one shelf of
+ * near-identical boxes, half of which do something else when tapped.
+ *
+ * Shown whether or not it holds anything. A section that only appears once it has
+ * something cannot be found before it does, and "where are my downloads" is answered
+ * by a section that is simply there.
  */
 @Composable
-private fun LibraryVideoDownloadsSection(
-    downloads: List<VideoDownloadStore.Entry>,
+private fun LibraryDownloadSections(
+    videoDownloads: List<VideoDownloadStore.Entry>,
+    pendingDownloads: List<VideoDownloadStore.Pending>,
     onPlayDownload: (VideoDownloadStore.Entry) -> Unit,
     onRemoveDownload: (VideoDownloadStore.Entry) -> Unit,
-    onSeeMore: () -> Unit,
+    onCancelDownload: (VideoDownloadStore.Pending) -> Unit,
+    onRetryDownload: (VideoDownloadStore.Pending) -> Unit,
 ) {
-    if (downloads.isEmpty()) return
     Column(modifier = Modifier.fillMaxWidth()) {
-        VideoLibrarySectionHeader(R.string.video_downloads, onSeeMore)
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            items(downloads, key = { it.videoId }) { download ->
-                VideoDownloadThumb(
-                    download = download,
-                    onClick = { onPlayDownload(download) },
-                    onRemove = { onRemoveDownload(download) },
-                )
+        // Videos only: the music side of downloads is a list of songs reached from its
+        // own entry further down, and repeating it here would be two places to keep
+        // right rather than one.
+        VideoLibrarySectionHeader(R.string.video_downloads)
+        if (videoDownloads.isEmpty() && pendingDownloads.isEmpty()) {
+            EmptyDownloadsRow(R.string.video_downloads_empty)
+        } else {
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(pendingDownloads, key = { it.videoId }) { pending ->
+                    PendingDownloadThumb(
+                        pending = pending,
+                        onRetry = { onRetryDownload(pending) },
+                        onCancel = { onCancelDownload(pending) },
+                    )
+                }
+                items(videoDownloads, key = { it.videoId }) { download ->
+                    VideoDownloadThumb(
+                        download = download,
+                        onClick = { onPlayDownload(download) },
+                        onRemove = { onRemoveDownload(download) },
+                    )
+                }
             }
         }
         Spacer(modifier = Modifier.height(8.dp))
+    }
+}
+
+/** A shelf with nothing on it yet, so the section can be found before it is useful. */
+@Composable
+private fun EmptyDownloadsRow(labelRes: Int) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        modifier = Modifier
+            .padding(horizontal = 12.dp)
+            .fillMaxWidth(),
+    ) {
+        Text(
+            text = stringResource(labelRes),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 14.dp),
+        )
+    }
+}
+
+/** A video on its way, with the ring that says how far along it is. */
+@Composable
+private fun PendingDownloadThumb(
+    pending: VideoDownloadStore.Pending,
+    onRetry: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Column(modifier = Modifier.width(148.dp)) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+        ) {
+            pending.thumbnailUrl?.let { thumbnail ->
+                AsyncImage(
+                    model = thumbnail,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            if (pending.failed) {
+                Icon(
+                    painter = painterResource(R.drawable.error),
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(28.dp),
+                )
+            } else {
+                // No known length means no honest fraction, so the ring turns rather
+                // than sitting at a number that would mean nothing.
+                val fraction = pending.fraction
+                if (fraction == null) {
+                    CircularProgressIndicator(
+                        color = Color.White,
+                        strokeWidth = 3.dp,
+                        modifier = Modifier.size(28.dp),
+                    )
+                } else {
+                    CircularProgressIndicator(
+                        progress = { fraction },
+                        color = Color.White,
+                        trackColor = Color.Black.copy(alpha = 0.35f),
+                        strokeWidth = 3.dp,
+                        modifier = Modifier.size(28.dp),
+                    )
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = pending.title,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        // A failed download offers itself back up, because that is the only thing the
+        // person holding it can do about it. One still in progress offers to be stopped.
+        TextButton(
+            onClick = if (pending.failed) onRetry else onCancel,
+            contentPadding = PaddingValues(0.dp),
+            modifier = Modifier.height(24.dp),
+        ) {
+            Text(
+                text = stringResource(
+                    if (pending.failed) R.string.video_download_failed else R.string.remove_download,
+                ),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
     }
 }
 
