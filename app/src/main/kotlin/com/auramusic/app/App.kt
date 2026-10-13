@@ -85,6 +85,12 @@ class App : Application(), SingletonImageLoader.Factory {
         // Initialize Paxsenix synchronously so lyrics can be fetched immediately
         com.auramusic.paxsenix.Paxsenix.init(this)
 
+        // Playback resolves video streams from wherever it is called - the overlay, a
+        // resumed watch, autoplay - and each of those has to be able to tell that a
+        // video is already on the device. None of them has injected dependencies, so the
+        // context they need is set once here.
+        com.auramusic.app.utils.AuraPlayerUtils.currentContextForDownloads = this
+
         // تهيئة إعدادات التطبيق عند الإقلاع
         applicationScope.launch {
             initializeSettings()

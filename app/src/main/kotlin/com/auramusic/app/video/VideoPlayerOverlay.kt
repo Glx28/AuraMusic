@@ -23,15 +23,23 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -101,7 +109,9 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -126,6 +136,7 @@ import com.auramusic.app.LocalPlayerAwareWindowInsets
 import com.auramusic.app.R
 import com.auramusic.app.constants.SubtitleLanguageKey
 import com.auramusic.app.constants.SubtitlesEnabledKey
+import com.auramusic.app.constants.VideoCodec
 import com.auramusic.app.constants.VideoQuality
 import com.auramusic.app.subtitles.SubtitleLanguageOptions
 import com.auramusic.app.ui.component.ChannelAvatarStack
@@ -212,10 +223,14 @@ fun VideoPlayerOverlay(
     // for a picture-in-picture control rather than a down arrow.
     val onPictureInPictureRequest: () -> Unit = { VideoPlaybackManager.collapse() }
 
-    BackHandler(
-        enabled = !state.hiddenByMusic,
-        onBack = onCollapseRequest,
-    )
+    BackHandler(enabled = !state.hiddenByMusic) {
+        val ui = VideoPlaybackManager.uiState.value
+        // A video filling the window - full screen, or the pushed-down zoom - steps back
+        // to the player on the first press. Only from the ordinary player does back mean
+        // leaving the video.
+        if (ui.isFullScreen || ui.zoomMode) VideoPlaybackManager.exitFullScreen()
+        else onCollapseRequest()
+    }
 
     AnimatedVisibility(
         visible = !state.hiddenByMusic,
@@ -716,6 +731,14 @@ private fun VideoSurfaceWithControls(
 
     val collapseFraction = if (useFullHeight) 0f else (collapseDragPx / 900f).coerceIn(0f, 0.75f)
 
+    // Only a surface that fills the window can end up under the navigation bar; the
+    // inline player is laid out around it already.
+    val navigationBarPadding = if (useFullHeight) {
+        WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    } else {
+        0.dp
+    }
+
     Box(
         // A graphicsLayer directly above the video surface forces the whole subtree,
         // SurfaceView included, through an offscreen render target for every frame. It is
@@ -878,11 +901,17 @@ private fun VideoSurfaceWithControls(
         VideoCaptionOverlay(
             videoId = session.videoId,
             player = player,
-            bottomPadding = if (showControls) 108.dp else 20.dp,
+            // Above the seek bar while the controls are up, above the navigation bar
+            // always: a caption hidden behind either is a caption that is not there.
+            bottomPadding = navigationBarPadding + if (showControls) 108.dp else 20.dp,
             modifier = Modifier.align(Alignment.BottomCenter),
         )
 
         if (showControls) {
+            PlayerCenterControls(
+                uiState = uiState,
+                modifier = Modifier.align(Alignment.Center),
+            )
             PlayerTopBar(
                 onCollapse = onCollapse,
                 onClose = onClose,
@@ -1071,29 +1100,19 @@ private fun PlayerTopBar(
     }
 }
 
+/**
+ * Transport controls, in the middle of the picture.
+ *
+ * Centre is where the eye already is, and it is the only place they can go once the
+ * seek bar has been pushed up clear of the navigation bar: at the bottom the two
+ * compete for the same strip, and a video filling the window has nowhere else to put
+ * them.
+ */
 @Composable
-private fun PlayerBottomControls(
+private fun PlayerCenterControls(
     uiState: VideoPlaybackManager.UiState,
     modifier: Modifier = Modifier,
 ) {
-    // Position and duration arrive as getters rather than values. The manager publishes a
-    // fresh pair twice a second, and reading that state in composition would invalidate this
-    // whole controls subtree — including the video surface above it — on every tick. Reading
-    // through a getter at draw time confines the update to the two numbers that actually
-    // change: the elapsed label and the seek bar.
-    val posMs: () -> Long = { VideoPlaybackManager.positionState.value.first }
-    val durMs: () -> Long = { VideoPlaybackManager.positionState.value.second }
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(
-                Brush.verticalGradient(
-                    listOf(Color.Transparent, Color.Black.copy(alpha = 0.75f))
-                )
-            )
-            .padding(top = 20.dp, bottom = 6.dp)
-    ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
@@ -1161,6 +1180,36 @@ private fun PlayerBottomControls(
             }
         }
 
+}
+
+@Composable
+private fun PlayerBottomControls(
+    uiState: VideoPlaybackManager.UiState,
+    modifier: Modifier = Modifier,
+) {
+    // Position and duration arrive as getters rather than values. The manager publishes a
+    // fresh pair twice a second, and reading that state in composition would invalidate this
+    // whole controls subtree — including the video surface above it — on every tick. Reading
+    // through a getter at draw time confines the update to the two numbers that actually
+    // change: the elapsed label and the seek bar.
+    val posMs: () -> Long = { VideoPlaybackManager.positionState.value.first }
+    val durMs: () -> Long = { VideoPlaybackManager.positionState.value.second }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            // A video that fills the window draws over the navigation bar, so the seek
+            // bar has to be lifted by however much of it the system is showing. In the
+            // inline player the surrounding layout already accounts for that, and
+            // padding here as well would leave the bar floating.
+            .windowInsetsPadding(WindowInsets.navigationBars)
+            .background(
+                Brush.verticalGradient(
+                    listOf(Color.Transparent, Color.Black.copy(alpha = 0.75f))
+                )
+            )
+            .padding(top = 20.dp, bottom = 6.dp)
+    ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
@@ -1658,9 +1707,50 @@ private fun VideoInfoSection(
     uiState: VideoPlaybackManager.UiState,
     onChannelClick: (String) -> Unit,
 ) {
+    val haptic = LocalHapticFeedback.current
+    val density = LocalDensity.current
+    val canGrow = !uiState.isFullScreen && !uiState.zoomMode
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            // Pushing down from the title and the channel grows the surface. It lives
+            // here rather than on the picture because that is the part of the player
+            // that reads as a header, and on the picture it fired whenever a thumb
+            // rested there - including while someone was trying to scrub.
+            .pointerInput(canGrow) {
+                if (!canGrow) return@pointerInput
+                val threshold = with(density) { 80.dp.toPx() }
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var travelled = 0f
+                    // Not touched until the drag is committed, so a swipe that belongs to
+                    // the list below keeps working: downward, this list is already at the
+                    // top and has nowhere to go.
+                    var committed = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (change.changedToUpIgnoreConsumed()) break
+                        val delta = change.positionChange().y
+                        if (!committed) {
+                            travelled += delta
+                            if (travelled > threshold) {
+                                committed = true
+                                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                            } else if (travelled < -threshold / 3f) {
+                                // Upward, or sideways: not this gesture.
+                                break
+                            } else {
+                                change.consume()
+                                continue
+                            }
+                        }
+                        change.consume()
+                    }
+                    if (committed) VideoPlaybackManager.toggleZoomMode()
+                }
+            }
             .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
         Text(
@@ -2138,8 +2228,8 @@ private fun DownloadActionButton() {
     LaunchedEffect(videoId) {
         if (videoId != null) VideoDownloadStore.load(context)
     }
-    val entries by VideoDownloadStore.entries.collectAsState()
-    val progressById by VideoDownloadStore.progress.collectAsState()
+    val entries by VideoDownloadStore.entries(context).collectAsState()
+    val progressById by VideoDownloadStore.progress(context).collectAsState()
 
     var showDownloadDialog by remember { mutableStateOf(false) }
     var downloadError by remember { mutableStateOf(false) }
@@ -2207,34 +2297,140 @@ private fun DownloadActionButton() {
             onDismiss = { showDownloadDialog = false },
             onRemove = { download ->
                 showDownloadDialog = false
-                scope.launch { VideoDownloadStore.remove(context, download.videoId) }
+                VideoDownloadStore.get(context).remove(download.videoId)
             },
-            onDownload = { quality ->
+            onDownload = { quality, codec ->
                 val id = videoId ?: return@VideoDownloadDialog
                 showDownloadDialog = false
                 scope.launch {
-                    // Resolved at the chosen quality, then restored: the preference is
-                    // the player's, and picking a download must not change how playback
-                    // streams.
-                    val previous = AuraPlayerUtils.preferredVideoQuality
-                    AuraPlayerUtils.setPreferredVideoQuality(quality)
-                    val source = AuraPlayerUtils.getVideoStreamSource(id).getOrNull()
-                    AuraPlayerUtils.setPreferredVideoQuality(previous)
+                    // Resolved at the chosen quality and codec, and passed explicitly
+                    // rather than through the playback preference: what gets stored on
+                    // the device is this choice, and it must not change how the video
+                    // currently playing streams.
+                    val source = AuraPlayerUtils.getVideoStreamSource(id, quality, codec).getOrNull()
                     if (source == null) {
                         downloadError = true
                         return@launch
                     }
-                    VideoDownloadStore.download(
-                        context = context,
+                    VideoDownloadStore.get(context).download(
                         videoId = id,
                         title = session?.title.orEmpty(),
                         channelName = session?.channelName.orEmpty(),
                         thumbnailUrl = session?.videoThumbnail,
                         source = source,
+                        quality = quality,
+                        codec = codec,
                         durationMs = VideoPlaybackManager.uiState.value.durationMs,
                     )
                 }
             },
+        )
+    }
+}
+
+/**
+ * Resolution and codec, as one control.
+ *
+ * The two belong together because they answer the same question - which stream to ask
+ * for - and a stream picker that hid one of them would leave people changing one and
+ * assuming the other followed. The settings panel and the download dialog share this,
+ * so the choice looks and behaves the same in both.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun VideoFormatPicker(
+    quality: VideoQuality,
+    codec: VideoCodec,
+    onQualityChange: (VideoQuality) -> Unit,
+    onCodecChange: (VideoCodec) -> Unit,
+    modifier: Modifier = Modifier,
+    /** Wraps the whole picker in scrolling when it is the dialog's only content. */
+    scrollable: Boolean = false,
+) {
+    val content: @Composable ColumnScope.() -> Unit = {
+        Text(
+            text = stringResource(R.string.video_quality),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        // Wraps rather than scrolls sideways: nine resolutions and four codecs do not
+        // fit a phone in one line, and a sideways-scrolling row hides half the ladder.
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+        ) {
+            VideoQuality.entries.forEach { entry ->
+                FormatChip(
+                    label = entry.label,
+                    selected = entry == quality,
+                    onClick = { onQualityChange(entry) },
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Text(
+            text = stringResource(R.string.video_codec),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+        ) {
+            VideoCodec.entries.forEach { entry ->
+                FormatChip(
+                    label = entry.label,
+                    selected = entry == codec,
+                    onClick = { onCodecChange(entry) },
+                )
+            }
+        }
+        if (codec != VideoCodec.CODEC_AUTO) {
+            Text(
+                text = stringResource(R.string.video_codec_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+    }
+
+    if (scrollable) {
+        Column(
+            modifier = modifier.verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            content = content,
+        )
+    } else {
+        Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp), content = content)
+    }
+}
+
+@Composable
+private fun FormatChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest,
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -2248,8 +2444,13 @@ private fun VideoDownloadDialog(
     existing: VideoDownloadStore.Entry?,
     onDismiss: () -> Unit,
     onRemove: (VideoDownloadStore.Entry) -> Unit,
-    onDownload: (com.auramusic.app.constants.VideoQuality) -> Unit,
+    onDownload: (VideoQuality, VideoCodec) -> Unit,
 ) {
+    // Starts on what is already chosen for playback: it is the choice most people would
+    // make again, and it makes the dialog's default visible instead of implied.
+    var quality by remember { mutableStateOf(VideoPlaybackManager.uiState.value.videoQuality) }
+    var codec by remember { mutableStateOf(VideoPlaybackManager.uiState.value.videoCodec) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.video_download)) },
@@ -2275,27 +2476,22 @@ private fun VideoDownloadDialog(
                     }
                     HorizontalDivider()
                 }
-                // Highest first: it is what most people want, and the sizes below it
-                // trade quality for space.
-                listOf(
-                    com.auramusic.app.constants.VideoQuality.QUALITY_1080P,
-                    com.auramusic.app.constants.VideoQuality.QUALITY_720P,
-                    com.auramusic.app.constants.VideoQuality.QUALITY_480P,
-                    com.auramusic.app.constants.VideoQuality.QUALITY_360P,
-                ).forEach { quality ->
-                    TextButton(
-                        onClick = { onDownload(quality) },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            text = stringResource(R.string.video_download_quality, quality.label),
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                }
+                VideoFormatPicker(
+                    quality = quality,
+                    codec = codec,
+                    onQualityChange = { quality = it },
+                    onCodecChange = { codec = it },
+                    scrollable = true,
+                    modifier = Modifier.heightIn(max = 320.dp),
+                )
             }
         },
         confirmButton = {
+            TextButton(onClick = { onDownload(quality, codec) }) {
+                Text(stringResource(R.string.video_download))
+            }
+        },
+        dismissButton = {
             TextButton(onClick = onDismiss) { Text(stringResource(android.R.string.cancel)) }
         },
     )
@@ -2929,39 +3125,12 @@ private fun SettingsOverlay(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                Text(
-                    text = "Quality",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                VideoFormatPicker(
+                    quality = uiState.videoQuality,
+                    codec = uiState.videoCodec,
+                    onQualityChange = { VideoPlaybackManager.setVideoFormat(it, uiState.videoCodec) },
+                    onCodecChange = { VideoPlaybackManager.setVideoFormat(uiState.videoQuality, it) },
                 )
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 8.dp)
-                ) {
-                    listOf(
-                        VideoQuality.QUALITY_360P to stringResource(R.string.video_player_quality_360p),
-                        VideoQuality.QUALITY_480P to stringResource(R.string.video_player_quality_480p),
-                        VideoQuality.QUALITY_720P to stringResource(R.string.video_player_quality_720p),
-                        VideoQuality.QUALITY_1080P to stringResource(R.string.video_player_quality_1080p),
-                    ).forEach { (quality, label) ->
-                        Surface(
-                            onClick = { VideoPlaybackManager.setVideoQuality(quality) },
-                            shape = RoundedCornerShape(12.dp),
-                            color = if (uiState.videoQuality == quality) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(
-                                text = label,
-                                modifier = Modifier.padding(vertical = 10.dp),
-                                textAlign = TextAlign.Center,
-                                style = MaterialTheme.typography.labelLarge,
-                                color = if (uiState.videoQuality == quality) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
 
                 Spacer(modifier = Modifier.height(16.dp))
 

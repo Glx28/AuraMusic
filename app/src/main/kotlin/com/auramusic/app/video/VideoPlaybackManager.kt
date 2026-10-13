@@ -30,6 +30,8 @@ import com.auramusic.app.constants.SavedVideosKey
 import com.auramusic.app.constants.VideoAutoplayEnabledKey
 import com.auramusic.app.constants.VideoHistoryKey
 import com.auramusic.app.constants.VideoQuality
+import com.auramusic.app.constants.VideoCodec
+import com.auramusic.app.constants.VideoCodecKey
 import com.auramusic.app.constants.VideoQualityKey
 import com.auramusic.app.constants.VideoSubscribedChannelsKey
 import com.auramusic.app.utils.AuraPlayerUtils
@@ -223,6 +225,7 @@ object VideoPlaybackManager {
         val playbackSpeed: Float = 1.0f,
         val resizeMode: Int = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT,
         val videoQuality: VideoQuality = VideoQuality.QUALITY_720P,
+        val videoCodec: VideoCodec = VideoCodec.CODEC_AUTO,
         val autoplayEnabled: Boolean = true,
         val suppressOverlay: Boolean = false,
         val isFullScreen: Boolean = false,
@@ -408,6 +411,8 @@ object VideoPlaybackManager {
     @Volatile private var loadGeneration = 0
 
     private var currentQuality: VideoQuality = VideoQuality.QUALITY_720P
+
+    private var currentCodec: VideoCodec = VideoCodec.CODEC_AUTO
     private var currentAutoplay: Boolean = true
 
     // Callback for VideoRecommendationManager to track watches
@@ -1723,24 +1728,37 @@ object VideoPlaybackManager {
      * and reloaded (keeping the same position). The choice is persisted so future
      * videos start at it too.
      */
-    fun setVideoQuality(quality: VideoQuality) {
+    fun setVideoQuality(quality: VideoQuality) = setVideoFormat(quality, currentCodec)
+
+    /**
+     * Changes resolution and codec together, since both are answered by the same stream
+     * lookup and re-resolving for one of them alone would only be half a change.
+     */
+    fun setVideoFormat(quality: VideoQuality, codec: VideoCodec) {
         val session = _uiState.value.session ?: return
         val exo = player ?: return
         currentQuality = quality
-        AuraPlayerUtils.setPreferredVideoQuality(quality)
+        currentCodec = codec
+        AuraPlayerUtils.setPreferredVideoFormat(quality, codec)
         val positionMs = exo.currentPosition
-        _uiState.update { it.copy(videoQuality = quality) }
+        _uiState.update { it.copy(videoQuality = quality, videoCodec = codec) }
         currentContext?.let { ctx ->
             scope.launch {
-                ctx.dataStore.edit { it[VideoQualityKey] = quality.name }
+                ctx.dataStore.edit {
+                    it[VideoQualityKey] = quality.name
+                    it[VideoCodecKey] = codec.name
+                }
             }
             scope.launch {
                 val source = withContext(Dispatchers.IO) {
-                    AuraPlayerUtils.getVideoStreamSource(session.videoId).getOrNull()
+                    // Passed explicitly rather than read back from the global preference,
+                    // which another caller may have changed while this was in flight.
+                    AuraPlayerUtils.getVideoStreamSource(session.videoId, quality, codec).getOrNull()
                 }
                 // The user may have switched video (or quality) while we resolved.
                 if (_uiState.value.session?.videoId != session.videoId ||
-                    _uiState.value.videoQuality != quality
+                    _uiState.value.videoQuality != quality ||
+                    _uiState.value.videoCodec != codec
                 ) {
                     return@launch
                 }
@@ -1908,6 +1926,21 @@ object VideoPlaybackManager {
     }
 
     /**
+     * Steps back out of a video that is filling the window, whether that was full screen
+     * or the pushed-down zoom.
+     *
+     * Back from either of those returns to the player rather than out of it: the surface
+     * was grown deliberately, and leaving the video entirely would skip the state in
+     * between. One step out, not two - which is what pressing back twice used to take.
+     */
+    fun exitFullScreen() {
+        val state = _uiState.value
+        if (!state.isFullScreen && !state.zoomMode) return
+        _uiState.update { it.copy(isFullScreen = false, zoomMode = false) }
+        applyOrientation(false)
+    }
+
+    /**
      * Grows the video surface to the whole screen while the video keeps its own aspect
      * and sits centred, so a portrait video stays portrait instead of being cropped or
      * stretched to fill.
@@ -2035,9 +2068,16 @@ object VideoPlaybackManager {
     private fun applyStoredPreferences(context: Context) {
         val storedQuality = context.dataStore.get(VideoQualityKey, "QUALITY_720P")
         currentQuality = runCatching { VideoQuality.valueOf(storedQuality) }.getOrDefault(VideoQuality.QUALITY_720P)
+        currentCodec = VideoCodec.fromName(context.dataStore.get(VideoCodecKey, VideoCodec.CODEC_AUTO.name))
         currentAutoplay = context.dataStore.get(VideoAutoplayEnabledKey, true)
-        AuraPlayerUtils.setPreferredVideoQuality(currentQuality)
-        _uiState.update { it.copy(videoQuality = currentQuality, autoplayEnabled = currentAutoplay) }
+        AuraPlayerUtils.setPreferredVideoFormat(currentQuality, currentCodec)
+        _uiState.update {
+            it.copy(
+                videoQuality = currentQuality,
+                videoCodec = currentCodec,
+                autoplayEnabled = currentAutoplay,
+            )
+        }
     }
 
     /**

@@ -167,7 +167,7 @@ fun LibraryMixScreen(
     // Downloaded videos, read from the store so the shelf is the same list the player
     // will play from.
     LaunchedEffect(Unit) { VideoDownloadStore.load(context) }
-    val videoDownloads by VideoDownloadStore.entries.collectAsState()
+    val videoDownloads by VideoDownloadStore.entries(context).collectAsState()
     val playDownload: (VideoDownloadStore.Entry) -> Unit = { entry ->
         VideoPlaybackManager.playWithDetails(
             context = context,
@@ -181,7 +181,7 @@ fun LibraryMixScreen(
         )
     }
     val removeDownload: (VideoDownloadStore.Entry) -> Unit = { entry ->
-        coroutineScope.launch { VideoDownloadStore.remove(context, entry.videoId) }
+        VideoDownloadStore.get(context).remove(entry.videoId)
     }
     val playVideoEntry: (VideoPlaybackManager.VideoHistoryEntry) -> Unit = { entry ->
         VideoPlaybackManager.play(
@@ -1182,9 +1182,16 @@ private fun VideoDownloadThumb(
             color = MaterialTheme.colorScheme.onSurface,
         )
         Text(
-            text = formatDownloadSize(download.sizeBytes),
+            // What it was saved at, not what it is playing at: this is the copy on the
+            // device, and a later change of preference must not rewrite history.
+            text = stringResource(
+                R.string.video_download_format,
+                formatDownloadSize(download.sizeBytes),
+                download.quality.label,
+            ) + (if (download.codec.isAuto) "" else " \u00b7 " + download.codec.label),
             style = MaterialTheme.typography.bodySmall,
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
         )
     }

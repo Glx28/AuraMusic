@@ -1132,12 +1132,7 @@ private fun VideoSettingsButton(
                                 Text("Quality")
                             }
                             Text(
-                                text = when (videoQuality) {
-                                    VideoQuality.QUALITY_360P -> "360p"
-                                    VideoQuality.QUALITY_480P -> "480p"
-                                    VideoQuality.QUALITY_720P -> "720p"
-                                    VideoQuality.QUALITY_1080P -> "1080p"
-                                },
+                                text = videoQuality.label,
                                 color = Color.Gray,
                                 fontSize = 13.sp
                             )
@@ -1245,12 +1240,7 @@ onClick = {
                 )
                 
                 VideoQuality.entries.forEach { quality ->
-                    val label = when (quality) {
-                        VideoQuality.QUALITY_360P -> "360p"
-                        VideoQuality.QUALITY_480P -> "480p"
-                        VideoQuality.QUALITY_720P -> "720p"
-                        VideoQuality.QUALITY_1080P -> "1080p"
-                    }
+                    val label = quality.label
                     DropdownMenuItem(
                         text = {
                             Row(

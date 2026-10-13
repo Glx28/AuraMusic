@@ -114,6 +114,8 @@ import com.auramusic.app.constants.DisableLoadMoreWhenRepeatAllKey
 import com.auramusic.app.constants.DiscordUseDetailsKey
 import com.auramusic.app.constants.EnableDiscordRPCKey
 import com.auramusic.app.constants.VideoQuality
+import com.auramusic.app.constants.VideoCodec
+import com.auramusic.app.constants.VideoCodecKey
 import com.auramusic.app.constants.VideoQualityKey
 import com.auramusic.app.constants.AutomixEnabledKey
 import com.auramusic.app.constants.AutomixBlendPercentKey
@@ -895,17 +897,17 @@ class MusicService :
         audioQuality = dataStore.get(AudioQualityKey).toEnum(com.auramusic.app.constants.AudioQuality.AUTO)
         playerVolume = MutableStateFlow(dataStore.get(PlayerVolumeKey, 1f).coerceIn(0f, 1f))
 
-        // Initialize video quality preference from settings
+        // Initialize the video format preference from settings. Both are read here as
+        // well as by the video player: this service resolves streams for video songs in
+        // the audio player, and a quality it has not heard of would silently play at
+        // whatever the last video happened to set.
         val savedVideoQuality = dataStore.get(VideoQualityKey, "QUALITY_720P")
-        val auraVideoQuality = when (savedVideoQuality) {
-            "QUALITY_1080P" -> com.auramusic.auravideo.AuraVideo.VideoQuality.QUALITY_1080P
-            "QUALITY_720P" -> com.auramusic.auravideo.AuraVideo.VideoQuality.QUALITY_720P
-            "QUALITY_480P" -> com.auramusic.auravideo.AuraVideo.VideoQuality.QUALITY_480P
-            "QUALITY_360P" -> com.auramusic.auravideo.AuraVideo.VideoQuality.QUALITY_360P
-            else -> com.auramusic.auravideo.AuraVideo.VideoQuality.QUALITY_720P
-        }
-        com.auramusic.auravideo.AuraVideo.setPreferredVideoQuality(auraVideoQuality)
-        Timber.d("Initialized video quality preference: $savedVideoQuality")
+        val savedVideoCodec = dataStore.get(VideoCodecKey, VideoCodec.CODEC_AUTO.name)
+        AuraPlayerUtils.setPreferredVideoFormat(
+            VideoQuality.fromName(savedVideoQuality),
+            VideoCodec.fromName(savedVideoCodec),
+        )
+        Timber.d("Initialized video format preference: $savedVideoQuality, $savedVideoCodec")
 
         // Initialize Google Cast
         initializeCast()

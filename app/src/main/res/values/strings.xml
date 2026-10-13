@@ -1110,6 +1110,9 @@
     <string name="captions_on">On</string>
     <string name="video_not_available">Video not available for this track</string>
     <string name="video_quality">Video Quality</string>
+    <string name="video_codec">Codec</string>
+    <string name="video_codec_hint">A codec the device cannot decode in hardware will make playback stutter. If a choice comes up silent or unwatched, leave it on Auto.</string>
+    <string name="video_download_format">%1$s \u00b7 %2$s</string>
     <string name="video_lyrics_offset">Video Lyrics Offset</string>
     <string name="video_lyrics_offset_description">Adjust to sync lyrics with video (for intro/talk before music)</string>
     <!-- Video player UI -->

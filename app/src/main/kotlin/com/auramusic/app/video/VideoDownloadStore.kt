@@ -6,33 +6,57 @@
 package com.auramusic.app.video
 
 import android.content.Context
+import android.net.Uri
 import androidx.datastore.preferences.core.edit
+import androidx.media3.exoplayer.offline.Download
+import androidx.media3.exoplayer.offline.DownloadManager
+import androidx.media3.exoplayer.offline.DownloadRequest
+import androidx.media3.exoplayer.offline.DownloadService
+import com.auramusic.app.constants.VideoCodec
 import com.auramusic.app.constants.VideoDownloadsKey
+import com.auramusic.app.constants.VideoQuality
+import com.auramusic.app.di.VideoDownloadStoreEntryPoint
+import com.auramusic.app.playback.DownloadUtil
+import com.auramusic.app.playback.ExoDownloadService
 import com.auramusic.app.utils.dataStore
 import com.auramusic.app.utils.get
+import com.auramusic.auravideo.AuraVideo
+import dagger.hilt.android.EntryPointAccessors
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import timber.log.Timber
 import java.io.File
+import javax.inject.Inject
+import javax.inject.Singleton
 
 /**
  * Videos kept on the device, so they play with no connection.
  *
- * Songs go through the platform download service; a video cannot, because the video
- * player does not read that cache. So a video is fetched here into the app's own files
- * and playback is pointed at those bytes - which means the same file serves both online
- * and offline, and a downloaded video never spends data it does not need to.
+ * Videos are registered with the same download manager that handles songs rather than
+ * being fetched by a loop of their own. That is what puts them in the notification the
+ * user already has for downloads - one notification counting songs and videos together -
+ * instead of a second one that knows nothing about the first, and it is what makes a
+ * video download survive the app being closed, since the work now belongs to a service
+ * that keeps running rather than to a coroutine that dies with the process.
  *
- * A video arrives either muxed or as separate video and audio streams. Both are stored;
- * a download is only "ready" once every file it needs has finished, because half a
- * video plays silence and half a video plays a frozen frame.
+ * A video arrives either muxed or as separate video and audio streams, and both shapes
+ * are stored as cache keys rather than as files. Playback asks for the key and is handed
+ * the cached file, so every route into playback - opening it, resuming it, autoplay -
+ * picks the download up without knowing anything about downloads.
  */
-object VideoDownloadStore {
+@Singleton
+class VideoDownloadStore @Inject constructor(
+    @ApplicationContext private val context: Context,
+    private val downloadUtil: DownloadUtil,
+) {
 
-    private const val DIR_NAME = "video_downloads"
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** One stored video, as shown on the shelf and recorded for playback. */
     data class Entry(
@@ -40,26 +64,26 @@ object VideoDownloadStore {
         val title: String,
         val channelName: String,
         val thumbnailUrl: String?,
-        /** Muxed file, when the source was a single stream. */
-        val videoFile: String?,
-        /** Separate streams, when it was not. Both are required for a ready download. */
-        val videoPartFile: String?,
-        val audioPartFile: String?,
+        /**
+         * Which keys make up this video: a single muxed one, or a video-only and an
+         * audio-only key that have to be merged at playback. A download is only ready
+         * once every key it needs has finished - half a video plays silence, and half a
+         * video plays a frozen frame.
+         */
+        val videoKey: String,
+        val audioKey: String?,
         val videoMimeType: String?,
         val audioMimeType: String?,
+        /** Expected size of each part, so a truncated file is not played as a whole one. */
+        val videoBytes: Long,
+        val audioBytes: Long,
         val height: Int,
+        val quality: VideoQuality,
+        val codec: VideoCodec,
         val sizeBytes: Long,
         val durationMs: Long,
         val downloadedAt: Long,
-    ) {
-        /** Every file this entry needs is on disk and non-empty. */
-        fun isComplete(files: File): Boolean {
-            val needed = listOfNotNull(videoFile, if (videoFile == null) videoPartFile else null, audioPartFile)
-            return needed.isNotEmpty() && needed.all { name ->
-                File(files, name).let { it.exists() && it.length() > 0 }
-            }
-        }
-    }
+    )
 
     /** Progress of an in-flight download, keyed by video id. */
     data class Progress(
@@ -71,45 +95,89 @@ object VideoDownloadStore {
     )
 
     private val _entries = MutableStateFlow<List<Entry>>(emptyList())
-    val entries: MutableStateFlow<List<Entry>> = _entries
-
     private val _progress = MutableStateFlow<Map<String, Progress>>(emptyMap())
-    val progress: MutableStateFlow<Map<String, Progress>> = _progress
-
     private val _loaded = MutableStateFlow(false)
-    val loaded: Boolean get() = _loaded.value
 
-    private val client: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .proxy(com.auramusic.innertube.YouTube.proxy)
-            .proxyAuthenticator { _, response ->
-                com.auramusic.innertube.YouTube.proxyAuth?.let { auth ->
-                    response.request.newBuilder()
-                        .header("Proxy-Authorization", auth)
-                        .build()
-                } ?: response.request
-            }
-            .build()
-    }
+    private val cache get() = downloadUtil.downloadCache
 
-    private fun downloadsDir(context: Context): File =
-        File(context.filesDir, DIR_NAME).apply { if (!exists()) mkdirs() }
+    init {
+        downloadUtil.downloadManager.addListener(
+            object : DownloadManager.Listener {
+                override fun onDownloadChanged(
+                    downloadManager: DownloadManager,
+                    download: Download,
+                    finalException: Exception?,
+                ) {
+                    val parsed = VideoDownloadKeys.parse(download.request.id) ?: return
+                    scope.launch {
+                        if (download.state == Download.STATE_COMPLETED) {
+                            completePart(parsed, download)
+                        } else if (download.state == Download.STATE_FAILED) {
+                            _progress.value = _progress.value + (
+                                parsed.videoId to Progress(
+                                    videoId = parsed.videoId,
+                                    downloadedBytes = download.bytesDownloaded,
+                                    totalBytes = download.contentLength ?: 0L,
+                                    done = false,
+                                    failed = true,
+                                )
+                                )
+                        }
+                        publishProgress()
+                    }
+                }
+            },
+        )
 
-    /** Loads the stored list once per process. */
-    suspend fun load(context: Context) {
-        if (_loaded.value) return
-        withContext(Dispatchers.IO) {
-            val raw = runCatching { context.dataStore[VideoDownloadsKey] }.getOrNull()
-            _entries.value = parse(raw)
-            // Drop anything whose files went missing behind our back.
-            val dir = downloadsDir(context)
-            _entries.value = _entries.value.filter { it.isComplete(dir) }
-            _loaded.value = true
+        // Progress is reported by the download manager, so the per-video view of it has
+        // to be recomputed whenever any download changes - including songs, which share
+        // the manager.
+        scope.launch {
+            downloadUtil.downloads.collect { publishProgress() }
         }
     }
 
-    fun isDownloaded(videoId: String): Boolean =
-        _entries.value.any { it.videoId == videoId }
+    private suspend fun load() {
+        if (_loaded.value) return
+        withContext(Dispatchers.IO) {
+            _entries.value = parse(context.dataStore.get(VideoDownloadsKey))
+            _loaded.value = true
+        }
+        // A video whose download finished while the process was gone is complete but
+        // unrecorded: the index still holds it, so the entry is written from there.
+        reconcileCompleted()
+    }
+
+    /**
+     * Turns downloads the index reports as finished into entries.
+     *
+     * Without this a download that completed in the background - the normal case now that
+     * the service owns the work - would leave its video unrecorded and therefore played
+     * from the network.
+     */
+    private suspend fun reconcileCompleted() {
+        val finished = runCatching {
+            downloadUtil.downloadManager.downloadIndex.getDownloads().use { cursor ->
+                val ids = mutableListOf<String>()
+                while (cursor.moveToNext()) {
+                    ids += cursor.download?.request?.id.orEmpty()
+                }
+                ids.filter { VideoDownloadKeys.parse(it) != null }
+            }
+        }.getOrNull().orEmpty()
+
+        for (key in finished) {
+            val parsed = VideoDownloadKeys.parse(key) ?: continue
+            if (entry(parsed.videoId) != null) continue
+            val state = runCatching {
+                downloadUtil.downloadManager.downloadIndex.getDownload(key)
+            }.getOrNull() ?: continue
+            if (state.state == Download.STATE_COMPLETED) completePart(parsed, state)
+        }
+        publishProgress()
+    }
+
+    fun isDownloaded(videoId: String): Boolean = entry(videoId) != null
 
     fun entry(videoId: String): Entry? = _entries.value.firstOrNull { it.videoId == videoId }
 
@@ -118,166 +186,234 @@ object VideoDownloadStore {
     fun progressFor(videoId: String): Progress? = _progress.value[videoId]
 
     /**
-     * Local playback source for a downloaded video, or null when it is not stored.
-     * Returning a source with file paths means every player path - online, offline, the
-     * overlay, a resumed watch - picks the download up without knowing about it.
+     * The file behind a cache key, or null when it is not wholly there.
+     *
+     * The cache holds a key as spans, and a half-written download is a span that stops
+     * early. Handing playback that file would produce a video that ends before the
+     * storyboard says it should, so the length has to match what the download reported.
      */
-    fun localSource(context: Context, videoId: String): com.auramusic.auravideo.AuraVideo.VideoStreamSource? {
+    private fun cachedFile(key: String, expectedBytes: Long): File? {
+        val spans = cache.getCachedSpans(key)
+        if (spans.size != 1) return null
+        val span = spans.first()
+        if (!span.isCached) return null
+        if (expectedBytes > 0L && span.length != expectedBytes) return null
+        return span.file?.takeIf { it.exists() && it.length() == span.length }
+    }
+
+    /**
+     * Local playback source for a downloaded video, or null when it is not stored.
+     *
+     * Handing back file paths means every player path picks the download up without
+     * knowing about it. The cache is asked rather than the recorded entry, so a video
+     * whose bytes were cleared out from under us is treated as absent instead of being
+     * handed a path that no longer resolves.
+     */
+    fun localSource(videoId: String): AuraVideo.VideoStreamSource? {
         val entry = entry(videoId) ?: return null
-        val dir = downloadsDir(context)
-        if (!entry.isComplete(dir)) return null
-        val asFileUri = { name: String -> File(dir, name).toURI().toString() }
-        entry.videoFile?.let { file ->
-            return com.auramusic.auravideo.AuraVideo.VideoStreamSource.Single(
-                url = asFileUri(file),
-                mimeType = entry.videoMimeType ?: "video/mp4",
-            )
-        }
-        val videoPart = entry.videoPartFile ?: return null
-        val audioPart = entry.audioPartFile ?: return null
-        return com.auramusic.auravideo.AuraVideo.VideoStreamSource.Merged(
-            videoUrl = asFileUri(videoPart),
+        val videoFile = cachedFile(entry.videoKey, entry.videoBytes) ?: return null
+        val videoUrl = Uri.fromFile(videoFile).toString()
+
+        val audioKey = entry.audioKey ?: return AuraVideo.VideoStreamSource.Single(
+            url = videoUrl,
+            mimeType = entry.videoMimeType ?: "video/mp4",
+        )
+
+        val audioFile = cachedFile(audioKey, entry.audioBytes) ?: return null
+        return AuraVideo.VideoStreamSource.Merged(
+            videoUrl = videoUrl,
             videoMimeType = entry.videoMimeType ?: "video/mp4",
-            audioUrl = asFileUri(audioPart),
+            audioUrl = Uri.fromFile(audioFile).toString(),
             audioMimeType = entry.audioMimeType ?: "audio/mp4",
             height = entry.height,
         )
     }
 
     /**
-     * Fetches the streams into local files. Everything is written to a temporary name and
-     * only recorded once complete, so an interrupted download can never be mistaken for a
-     * finished one and then play half a video.
+     * Registers a download for a video at the chosen quality and codec.
+     *
+     * The shape of the stream is resolved first because it decides how many downloads
+     * there are: a muxed stream is one file, a separate video and audio pair is two, and
+     * only one of the two answers can be played. The choice travels in the cache key, so
+     * a download that is resumed after the process has gone still knows what it was
+     * meant to fetch.
      */
-    suspend fun download(
-        context: Context,
+    fun download(
         videoId: String,
         title: String,
         channelName: String,
         thumbnailUrl: String?,
-        source: com.auramusic.auravideo.AuraVideo.VideoStreamSource,
-        durationMs: Long = 0,
+        source: AuraVideo.VideoStreamSource,
+        quality: VideoQuality,
+        codec: VideoCodec,
+        durationMs: Long,
     ) {
-        val ctx = context.applicationContext
-        val dir = downloadsDir(ctx)
-        val tmpSuffix = ".part"
-        val targets: List<Pair<String, String>> = when (source) {
-            is com.auramusic.auravideo.AuraVideo.VideoStreamSource.Single ->
-                listOf("${videoId}.mp4$tmpSuffix" to source.url)
+        val parts = when (source) {
+            is AuraVideo.VideoStreamSource.Single -> listOf(
+                VideoDownloadPart(VideoDownloadKeys.PART_MUXED, source.url, source.mimeType),
+            )
 
-            is com.auramusic.auravideo.AuraVideo.VideoStreamSource.Merged -> listOf(
-                "${videoId}.v$tmpSuffix" to source.videoUrl,
-                "${videoId}.a$tmpSuffix" to source.audioUrl,
+            is AuraVideo.VideoStreamSource.Merged -> listOf(
+                VideoDownloadPart(VideoDownloadKeys.PART_VIDEO, source.videoUrl, source.videoMimeType),
+                VideoDownloadPart(VideoDownloadKeys.PART_AUDIO, source.audioUrl, source.audioMimeType),
             )
         }
 
-        _progress.value = _progress.value + (videoId to Progress(videoId, 0, 0, false, false))
-        var totalBytes = 0L
-        val written = mutableMapOf<String, Long>()
-        try {
-            for ((name, url) in targets) {
-                val request = Request.Builder().url(url).build()
-                client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) error("HTTP ${response.code}")
-                    val body = response.body ?: error("Empty body")
-                    totalBytes += body.contentLength().coerceAtLeast(0)
-                    val target = File(dir, name)
-                    body.byteStream().use { input ->
-                        target.outputStream().buffered().use { output ->
-                            val buffer = ByteArray(64 * 1024)
-                            var read: Int
-                            var soFar = 0L
-                            while (input.read(buffer).also { read = it } != -1) {
-                                output.write(buffer, 0, read)
-                                soFar += read
-                                written[name] = soFar
-                                _progress.value = _progress.value + (
-                                    videoId to Progress(
-                                        videoId = videoId,
-                                        downloadedBytes = written.values.sum(),
-                                        totalBytes = if (totalBytes > 0) totalBytes else 0,
-                                        done = false,
-                                        failed = false,
-                                    )
-                                    )
-                            }
-                        }
-                    }
-                }
-            }
+        val payload = org.json.JSONObject().apply {
+            put("id", videoId)
+            put("t", title)
+            put("c", channelName)
+            put("th", thumbnailUrl ?: "")
+            put("d", durationMs)
+            put("h", (source as? AuraVideo.VideoStreamSource.Merged)?.height ?: 0)
+            put("mv", parts.first { it.part != VideoDownloadKeys.PART_AUDIO }.mimeType)
+            put("ma", parts.firstOrNull { it.part == VideoDownloadKeys.PART_AUDIO }?.mimeType ?: "")
+            put("q", quality.name)
+            put("k", codec.name)
+            put("p", parts.joinToString(",") { it.part })
+        }.toString()
 
-            // Rename out of the temporary names only once every file has arrived.
-            val finalNames = mutableMapOf<String, String>()
-            targets.forEach { (name, _) ->
-                val from = File(dir, name)
-                val to = File(dir, name.removeSuffix(tmpSuffix))
-                if (!from.renameTo(to)) error("Could not finalise ${from.name}")
-                finalNames[name] = to.name
-            }
-
-            val entry = Entry(
-                videoId = videoId,
-                title = title,
-                channelName = channelName,
-                thumbnailUrl = thumbnailUrl,
-                videoFile = finalNames[targets.firstOrNull()?.first]
-                    ?.takeIf { source is com.auramusic.auravideo.AuraVideo.VideoStreamSource.Single },
-                videoPartFile = finalNames["${videoId}.v$tmpSuffix"],
-                audioPartFile = finalNames["${videoId}.a$tmpSuffix"],
-                videoMimeType = when (source) {
-                    is com.auramusic.auravideo.AuraVideo.VideoStreamSource.Single -> source.mimeType
-                    is com.auramusic.auravideo.AuraVideo.VideoStreamSource.Merged -> source.videoMimeType
-                },
-                audioMimeType = (source as? com.auramusic.auravideo.AuraVideo.VideoStreamSource.Merged)?.audioMimeType,
-                height = (source as? com.auramusic.auravideo.AuraVideo.VideoStreamSource.Merged)?.height ?: 0,
-                sizeBytes = targets.sumOf { File(dir, finalNames[it.first].orEmpty()).length() },
-                durationMs = durationMs,
-                downloadedAt = System.currentTimeMillis(),
-            )
-            _entries.value = listOf(entry) + _entries.value.filterNot { it.videoId == videoId }
-            persist(ctx)
-            _progress.value = _progress.value + (videoId to Progress(videoId, entry.sizeBytes, entry.sizeBytes, true, false))
-        } catch (e: Exception) {
-            // Nothing half-written is kept: the store only ever holds complete files.
-            targets.forEach { (name, _) -> File(dir, name).delete() }
-            targets.forEach { (name, _) -> File(dir, name.removeSuffix(tmpSuffix)).delete() }
-            Timber.tag("VideoDownloads").w(e, "Download failed for %s", videoId)
-            _progress.value = _progress.value + (videoId to Progress(videoId, 0, 0, false, true))
+        parts.forEach { part ->
+            val key = VideoDownloadKeys.key(videoId, part.part, quality, codec)
+            val request = DownloadRequest.Builder(key, Uri.parse(part.url))
+                .setCustomCacheKey(key)
+                .setMimeType(part.mimeType)
+                .setData(payload.toByteArray())
+                .build()
+            // Not foregrounded: the download service already holds the notification for
+            // everything in flight, and asking for a second one here would replace it.
+            DownloadService.sendAddDownload(context, ExoDownloadService::class.java, request, false)
         }
     }
 
-    /** Deletes the files and forgets the entry. */
-    suspend fun remove(context: Context, videoId: String) {
-        val ctx = context.applicationContext
-        withContext(Dispatchers.IO) {
-            val dir = downloadsDir(ctx)
-            val existing = entry(videoId)
-            listOfNotNull(existing?.videoFile, existing?.videoPartFile, existing?.audioPartFile)
-                .forEach { File(dir, it).delete() }
-            File(dir, "$videoId.mp4.part").delete()
-            File(dir, "$videoId.v.part").delete()
-            File(dir, "$videoId.a.part").delete()
+    /** Takes a video off the device, including anything still downloading. */
+    fun remove(videoId: String) {
+        val entry = entry(videoId)
+        listOfNotNull(entry?.videoKey, entry?.audioKey).forEach { key ->
+            DownloadService.sendRemoveDownload(context, ExoDownloadService::class.java, key, false)
+        }
+        // A download that never finished has no entry, so its keys are derived instead:
+        // without this a half-finished download would keep running with nothing left to
+        // show for it.
+        VideoDownloadKeys.allKeysFor(videoId).forEach { key ->
+            DownloadService.sendRemoveDownload(context, ExoDownloadService::class.java, key, false)
+        }
+        scope.launch {
             _entries.value = _entries.value.filterNot { it.videoId == videoId }
-            persist(ctx)
+            _progress.value = _progress.value - videoId
+            persist()
+            publishProgress()
         }
     }
 
-    private suspend fun persist(context: Context) {
+    /**
+     * Records a video once every part of it has arrived.
+     *
+     * Nothing is written until all of it is there: a recorded entry is what playback
+     * treats as playable, and one recorded early would send the player to a file that is
+     * still growing.
+     */
+    private suspend fun completePart(parsed: VideoDownloadKeys.Parsed, download: Download) {
+        val payload = runCatching {
+            org.json.JSONObject(String(download.request.data ?: ByteArray(0)))
+        }.getOrNull() ?: return
+
+        val parts = payload.optJSONArray("p")?.let { array ->
+            (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotEmpty) }
+        }.orEmpty()
+        if (parts.isEmpty() || parsed.part !in parts) return
+
+        val index = downloadUtil.downloadManager.downloadIndex
+        val sizes = parts.associateWith { part ->
+            val key = VideoDownloadKeys.key(parsed.videoId, part, parsed.quality, parsed.codec)
+            val state = runCatching { index.getDownload(key) }.getOrNull()
+            state?.takeIf { it.state == Download.STATE_COMPLETED }?.contentLength ?: 0L
+        }
+        // Every part present at its full length: anything less is still arriving.
+        if (sizes.values.any { it <= 0L }) return
+        if (parts.any { part ->
+                val key = VideoDownloadKeys.key(parsed.videoId, part, parsed.quality, parsed.codec)
+                cachedFile(key, sizes[part] ?: 0L) == null
+            }
+        ) {
+            return
+        }
+
+        val videoPart = VideoDownloadKeys.PART_VIDEO.takeIf { it in parts } ?: VideoDownloadKeys.PART_MUXED
+        val entry = Entry(
+            videoId = parsed.videoId,
+            title = payload.optString("t"),
+            channelName = payload.optString("c"),
+            thumbnailUrl = payload.optString("th").takeIf { it.isNotEmpty() },
+            videoKey = VideoDownloadKeys.key(parsed.videoId, videoPart, parsed.quality, parsed.codec),
+            audioKey = if (VideoDownloadKeys.PART_AUDIO in parts) {
+                VideoDownloadKeys.key(parsed.videoId, VideoDownloadKeys.PART_AUDIO, parsed.quality, parsed.codec)
+            } else {
+                null
+            },
+            videoMimeType = payload.optString("mv").takeIf { it.isNotEmpty() },
+            audioMimeType = payload.optString("ma").takeIf { it.isNotEmpty() },
+            videoBytes = sizes[videoPart] ?: 0L,
+            audioBytes = sizes[VideoDownloadKeys.PART_AUDIO] ?: 0L,
+            height = payload.optInt("h"),
+            quality = parsed.quality,
+            codec = parsed.codec,
+            sizeBytes = sizes.values.sum(),
+            durationMs = payload.optLong("d"),
+            downloadedAt = System.currentTimeMillis(),
+        )
+        _entries.value = listOf(entry) + _entries.value.filterNot { it.videoId == entry.videoId }
+        _progress.value = _progress.value + (
+            entry.videoId to Progress(entry.videoId, entry.sizeBytes, entry.sizeBytes, done = true, failed = false)
+            )
+        persist()
+    }
+
+    /**
+     * Republishes progress as one entry per video.
+     *
+     * A video is often two downloads, so its progress is the sum of the parts - otherwise
+     * the bar would restart at zero every time the second part began.
+     */
+    private fun publishProgress() {
+        val byVideo = downloadUtil.downloads.value
+            .mapNotNull { (key, download) -> VideoDownloadKeys.parse(key)?.let { it to download } }
+            .groupBy({ it.first.videoId }, { it.second })
+
+        val next = mutableMapOf<String, Progress>()
+        byVideo.forEach { (videoId, downloads) ->
+            next[videoId] = Progress(
+                videoId = videoId,
+                downloadedBytes = downloads.sumOf { it.bytesDownloaded },
+                totalBytes = downloads.sumOf { it.contentLength ?: 0L },
+                done = downloads.isNotEmpty() && downloads.all { it.state == Download.STATE_COMPLETED },
+                failed = downloads.any { it.state == Download.STATE_FAILED },
+            )
+        }
+        // Keep the finished state visible for a video whose downloads have left the
+        // manager's active list; without it the tile would drop its "downloaded" label.
+        _progress.value = _progress.value.mapValues { (id, old) -> next[id] ?: old } + next
+    }
+
+    private suspend fun persist() {
         withContext(Dispatchers.IO) {
             val array = org.json.JSONArray()
             _entries.value.forEach { e ->
                 array.put(
                     org.json.JSONObject().apply {
                         put("id", e.videoId)
+                        put("vk", e.videoKey)
+                        put("ak", e.audioKey ?: "")
                         put("t", e.title)
                         put("c", e.channelName)
                         put("th", e.thumbnailUrl ?: "")
-                        put("f", e.videoFile ?: "")
-                        put("pv", e.videoPartFile ?: "")
-                        put("pa", e.audioPartFile ?: "")
                         put("mv", e.videoMimeType ?: "")
                         put("ma", e.audioMimeType ?: "")
+                        put("vb", e.videoBytes)
+                        put("ab", e.audioBytes)
                         put("h", e.height)
+                        put("q", e.quality.name)
+                        put("k", e.codec.name)
                         put("b", e.sizeBytes)
                         put("d", e.durationMs)
                         put("at", e.downloadedAt)
@@ -295,18 +431,26 @@ object VideoDownloadStore {
             val array = org.json.JSONArray(raw)
             for (i in 0 until array.length()) {
                 val o = array.getJSONObject(i)
+                // An entry without a cache key predates the download service being used
+                // for videos, when the bytes lived in files of their own. Those files
+                // are no longer read, so keeping the record would only show a video that
+                // plays from the network while claiming to be downloaded.
+                val videoKey = o.optString("vk").takeIf { it.isNotEmpty() } ?: continue
                 out.add(
                     Entry(
                         videoId = o.optString("id"),
                         title = o.optString("t"),
                         channelName = o.optString("c"),
                         thumbnailUrl = o.optString("th").takeIf { it.isNotEmpty() },
-                        videoFile = o.optString("f").takeIf { it.isNotEmpty() },
-                        videoPartFile = o.optString("pv").takeIf { it.isNotEmpty() },
-                        audioPartFile = o.optString("pa").takeIf { it.isNotEmpty() },
+                        videoKey = videoKey,
+                        audioKey = o.optString("ak").takeIf { it.isNotEmpty() },
                         videoMimeType = o.optString("mv").takeIf { it.isNotEmpty() },
                         audioMimeType = o.optString("ma").takeIf { it.isNotEmpty() },
+                        videoBytes = o.optLong("vb"),
+                        audioBytes = o.optLong("ab"),
                         height = o.optInt("h"),
+                        quality = VideoQuality.fromName(o.optString("q")),
+                        codec = VideoCodec.fromName(o.optString("k")),
                         sizeBytes = o.optLong("b"),
                         durationMs = o.optLong("d"),
                         downloadedAt = o.optLong("at"),
@@ -314,6 +458,107 @@ object VideoDownloadStore {
                 )
             }
         }
-        return out
+        // A recorded video whose bytes are gone is not downloaded; dropping it keeps the
+        // shelf honest about what is on the device.
+        return out.filter { cachedFile(it.videoKey, it.videoBytes) != null }
     }
+
+    /** One stream half of a download: which part it is, where it comes from, what it is. */
+    private data class VideoDownloadPart(
+        val part: String,
+        val url: String,
+        val mimeType: String,
+    )
+
+    companion object {
+        /**
+         * The store, resolved from a context.
+         *
+         * Playback needs to ask whether a video is on the device before it resolves a
+         * stream, and it has no injected dependencies at that point - so the instance is
+         * looked up once and reused.
+         */
+        @Volatile
+        private var instance: VideoDownloadStore? = null
+
+        fun get(context: Context): VideoDownloadStore =
+            instance ?: synchronized(this) {
+                instance ?: EntryPointAccessors
+                    .fromApplication(
+                        context.applicationContext,
+                        VideoDownloadStoreEntryPoint::class.java,
+                    )
+                    .videoDownloadStore()
+                    .also { instance = it }
+            }
+
+        suspend fun load(context: Context) = get(context).load()
+
+        fun localSource(context: Context, videoId: String): AuraVideo.VideoStreamSource? =
+            get(context).localSource(videoId)
+
+        fun isDownloaded(context: Context, videoId: String): Boolean =
+            get(context).isDownloaded(videoId)
+
+        fun entries(context: Context): StateFlow<List<Entry>> = get(context)._entries
+
+        fun progress(context: Context): StateFlow<Map<String, Progress>> = get(context)._progress
+
+        fun progressFor(context: Context, videoId: String): Progress? =
+            get(context).progressFor(videoId)
+    }
+}
+
+/**
+ * How a video download is named in the download cache.
+ *
+ * The key carries everything a resumed download needs - which part of the stream it is,
+ * and at what quality and codec - because by the time it resumes the object that asked
+ * for it no longer exists, and a key that only said "video 123" could not be resolved
+ * into a URL at all.
+ */
+object VideoDownloadKeys {
+    const val PREFIX = "video:"
+
+    /** Muxed: one file carrying both. */
+    const val PART_MUXED = "m"
+
+    /** Video-only half of a split stream. */
+    const val PART_VIDEO = "v"
+
+    /** Audio-only half of a split stream. */
+    const val PART_AUDIO = "a"
+
+    data class Parsed(
+        val videoId: String,
+        val part: String,
+        val quality: VideoQuality,
+        val codec: VideoCodec,
+    )
+
+    fun key(videoId: String, part: String, quality: VideoQuality, codec: VideoCodec): String =
+        "$PREFIX$videoId|$part|${quality.name}|${codec.name}"
+
+    fun parse(key: String): Parsed? {
+        if (!key.startsWith(PREFIX)) return null
+        val parts = key.removePrefix(PREFIX).split("|")
+        if (parts.size != 4) return null
+        return Parsed(
+            videoId = parts[0],
+            part = parts[1],
+            quality = VideoQuality.fromName(parts[2]),
+            codec = VideoCodec.fromName(parts[3]),
+        )
+    }
+
+    /**
+     * Every part a video could have been registered under, for a download that never
+     * finished and so has no recorded entry to enumerate.
+     */
+    fun allKeysFor(videoId: String): List<String> =
+        VideoQuality.entries.flatMap { quality ->
+            VideoCodec.entries.flatMap { codec ->
+                listOf(PART_MUXED, PART_VIDEO, PART_AUDIO).map { key(videoId, it, quality, codec) }
+            }
+        }
 }

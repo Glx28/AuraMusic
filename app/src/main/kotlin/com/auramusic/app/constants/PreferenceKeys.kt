@@ -147,11 +147,27 @@ enum class AudioQuality {
     LOW,
 }
 
-enum class VideoQuality(val label: String) {
-    QUALITY_360P("360p"),
-    QUALITY_480P("480p"),
-    QUALITY_720P("720p"),
-    QUALITY_1080P("1080p");
+/**
+ * The resolution ladder offered for video, lowest to highest.
+ *
+ * The heights are the ones YouTube actually publishes, including the tiers below 360p
+ * and the two above 1080p. "Auto" hands the choice to stream selection, which then
+ * takes the best the particular video actually offers - a choice worth having, because
+ * a 240p video has nothing above it to fall back to and asking for 1080p there just
+ * means picking the only thing on offer by a slower route.
+ */
+enum class VideoQuality(val label: String, val height: Int) {
+    QUALITY_AUTO("Auto", 0),
+    QUALITY_144P("144p", 144),
+    QUALITY_240P("240p", 240),
+    QUALITY_360P("360p", 360),
+    QUALITY_480P("480p", 480),
+    QUALITY_720P("720p", 720),
+    QUALITY_1080P("1080p", 1080),
+    QUALITY_1440P("1440p", 1440),
+    QUALITY_2160P("2160p", 2160);
+
+    val isAuto: Boolean get() = this == QUALITY_AUTO
 
     companion object {
         fun fromName(value: String?): VideoQuality =
@@ -159,7 +175,31 @@ enum class VideoQuality(val label: String) {
     }
 }
 
+/**
+ * Which video codec to ask for.
+ *
+ * They are not interchangeable and none is simply "better": H.264 decodes in hardware
+ * on effectively every Android device, VP9 and AV1 compress harder for the same picture
+ * but cost CPU when the hardware cannot help, and each is published at a different set
+ * of resolutions. "Auto" prefers what the device can decode cheaply and falls back
+ * from there.
+ */
+enum class VideoCodec(val label: String) {
+    CODEC_AUTO("Auto"),
+    CODEC_H264("H.264"),
+    CODEC_VP9("VP9"),
+    CODEC_AV1("AV1");
+
+    val isAuto: Boolean get() = this == CODEC_AUTO
+
+    companion object {
+        fun fromName(value: String?): VideoCodec =
+            entries.firstOrNull { it.name == value } ?: CODEC_AUTO
+    }
+}
+
 val VideoQualityKey = stringPreferencesKey("videoQuality")
+val VideoCodecKey = stringPreferencesKey("videoCodec")
 val VideoFitModeKey = intPreferencesKey("videoFitMode")
 val VideoAutoplayEnabledKey = booleanPreferencesKey("videoAutoplayEnabled")
 

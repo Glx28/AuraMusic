@@ -1,6 +1,7 @@
 package com.auramusic.app.utils
 
 import android.content.Context
+import com.auramusic.app.constants.VideoCodec
 import com.auramusic.app.constants.VideoQuality
 import com.auramusic.auravideo.AuraVideo
 import com.auramusic.auravideo.AuraVideo.VideoStreamResult
@@ -30,16 +31,27 @@ object AuraPlayerUtils {
     var preferredVideoQuality: VideoQuality = VideoQuality.QUALITY_720P
         private set
 
+    /**
+     * The codec playback is currently asking for, kept alongside the quality so a caller
+     * that changes one temporarily can put both back.
+     */
+    var preferredVideoCodec: VideoCodec = VideoCodec.CODEC_AUTO
+        private set
+
     fun setPreferredVideoQuality(quality: VideoQuality) {
         preferredVideoQuality = quality
-        // Map PreferenceKeys.VideoQuality to AuraVideo.VideoQuality
-        val auraQuality = when (quality) {
-            VideoQuality.QUALITY_360P -> AuraVideo.VideoQuality.QUALITY_360P
-            VideoQuality.QUALITY_480P -> AuraVideo.VideoQuality.QUALITY_480P
-            VideoQuality.QUALITY_720P -> AuraVideo.VideoQuality.QUALITY_720P
-            VideoQuality.QUALITY_1080P -> AuraVideo.VideoQuality.QUALITY_1080P
-        }
-        AuraVideo.setPreferredVideoQuality(auraQuality)
+        AuraVideo.setPreferredVideoQuality(quality.toLibrary())
+    }
+
+    fun setPreferredVideoCodec(codec: VideoCodec) {
+        preferredVideoCodec = codec
+        AuraVideo.setPreferredCodec(codec.toLibrary())
+    }
+
+    /** Applies both preferences at once, so a caller never leaves one of them behind. */
+    fun setPreferredVideoFormat(quality: VideoQuality, codec: VideoCodec) {
+        setPreferredVideoQuality(quality)
+        setPreferredVideoCodec(codec)
     }
 
     suspend fun getVideoStreamUrl(videoId: String): Result<String> = withContext(Dispatchers.IO) {
@@ -65,7 +77,11 @@ object AuraPlayerUtils {
      * YouTube — the caller MUST handle the [AuraVideo.VideoStreamSource.Merged]
      * case to actually display 1080p video.
      */
-    suspend fun getVideoStreamSource(videoId: String): Result<AuraVideo.VideoStreamSource> =
+    suspend fun getVideoStreamSource(
+        videoId: String,
+        quality: VideoQuality = preferredVideoQuality,
+        codec: VideoCodec = preferredVideoCodec,
+    ): Result<AuraVideo.VideoStreamSource> =
         withContext(Dispatchers.IO) {
             // A downloaded video is played from disk. Checked first, so this holds for
             // every route into playback - opening it, resuming it, autoplay - and costs
@@ -77,8 +93,11 @@ object AuraPlayerUtils {
                     return@withContext Result.success(local)
                 }
             }
-            Timber.tag(logTag).d("AuraPlayerUtils: Resolving stream source for videoId: $videoId")
-            AuraVideo.getVideoStreamSource(videoId).also { result ->
+            Timber.tag(logTag).d(
+                "AuraPlayerUtils: Resolving stream source for videoId: $videoId " +
+                    "(${quality.label}, ${codec.label})"
+            )
+            AuraVideo.getVideoStreamSource(videoId, quality.toLibrary(), codec.toLibrary()).also { result ->
                 result.onSuccess { source ->
                     when (source) {
                         is AuraVideo.VideoStreamSource.Single ->
@@ -126,10 +145,17 @@ object AuraPlayerUtils {
     }
 }
 
-/** Maps app-level video quality constants to the library enum, used by settings UI. */
-fun appVideoQualityToLibrary(quality: VideoQuality): AuraVideo.VideoQuality = when (quality) {
-    VideoQuality.QUALITY_360P -> AuraVideo.VideoQuality.QUALITY_360P
-    VideoQuality.QUALITY_480P -> AuraVideo.VideoQuality.QUALITY_480P
-    VideoQuality.QUALITY_720P -> AuraVideo.VideoQuality.QUALITY_720P
-    VideoQuality.QUALITY_1080P -> AuraVideo.VideoQuality.QUALITY_1080P
-}
+/**
+ * Maps app-level video preferences to the library enums. Both sides carry the same
+ * names and the same ladder, so this is a checked identity rather than a table that
+ * has to be kept in step by hand.
+ */
+fun appVideoQualityToLibrary(quality: VideoQuality): AuraVideo.VideoQuality =
+    AuraVideo.VideoQuality.entries.firstOrNull { it.name == quality.name }
+        ?: AuraVideo.VideoQuality.QUALITY_720P
+
+fun VideoQuality.toLibrary(): AuraVideo.VideoQuality = appVideoQualityToLibrary(this)
+
+fun VideoCodec.toLibrary(): AuraVideo.VideoCodec =
+    AuraVideo.VideoCodec.entries.firstOrNull { it.name == name }
+        ?: AuraVideo.VideoCodec.CODEC_AUTO

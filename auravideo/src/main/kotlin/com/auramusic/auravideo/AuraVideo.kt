@@ -45,17 +45,44 @@ object AuraVideo {
     )
 
     /**
-     * Available video quality options
+     * The resolutions worth asking for. A height of zero means "whatever this video
+     * happens to have", which is a real choice rather than a gap in the list: most
+     * videos stop at 1080p, so a fixed 1080p request spends its fallback on every
+     * other video.
      */
     enum class VideoQuality(val height: Int, val label: String) {
+        QUALITY_AUTO(0, "Auto"),
+        QUALITY_144P(144, "144p"),
+        QUALITY_240P(240, "240p"),
         QUALITY_360P(360, "360p"),
         QUALITY_480P(480, "480p"),
         QUALITY_720P(720, "720p"),
-        QUALITY_1080P(1080, "1080p")
+        QUALITY_1080P(1080, "1080p"),
+        QUALITY_1440P(1440, "1440p"),
+        QUALITY_2160P(2160, "2160p");
+
+        val isAuto: Boolean get() = this == QUALITY_AUTO
+    }
+
+    /**
+     * Video codecs. Each is published at a different set of resolutions and costs the
+     * device a different amount to decode, so which one is best is a property of the
+     * hardware rather than of the video.
+     */
+    enum class VideoCodec(val label: String) {
+        CODEC_AUTO("Auto"),
+        CODEC_H264("H.264"),
+        CODEC_VP9("VP9"),
+        CODEC_AV1("AV1");
+
+        val isAuto: Boolean get() = this == CODEC_AUTO
     }
 
     // Default preferred quality - 720p
     var currentPreferredQuality: VideoQuality = VideoQuality.QUALITY_720P
+
+    /** Default preferred codec - decided per stream from what the device can decode. */
+    var currentPreferredCodec: VideoCodec = VideoCodec.CODEC_AUTO
 
     /**
      * Set preferred video quality
@@ -65,20 +92,30 @@ object AuraVideo {
     }
 
     /**
-     * Get all available qualities from a list of video streams
+     * Set preferred video codec
      */
-    private fun getAvailableQualities(streams: List<org.schabi.newpipe.extractor.stream.VideoStream>): List<VideoQuality> {
-        val qualities = mutableSetOf<VideoQuality>()
+    fun setPreferredCodec(codec: VideoCodec) {
+        currentPreferredCodec = codec
+    }
+
+    /**
+     * Resolutions actually on offer for a video, coarsest matching: a 1080-high stream
+     * satisfies a request for 1080p, and a request below it. Used by the quality pickers
+     * so the choices on offer are the ones this video can actually deliver.
+     */
+    fun availableQualities(streams: List<org.schabi.newpipe.extractor.stream.VideoStream>): List<VideoQuality> {
+        val tiers = mutableSetOf<Int>()
         for (stream in streams) {
             val height = stream.height
-            when {
-                height >= 1080 -> qualities.add(VideoQuality.QUALITY_1080P)
-                height >= 720 -> qualities.add(VideoQuality.QUALITY_720P)
-                height >= 480 -> qualities.add(VideoQuality.QUALITY_480P)
-                height >= 360 -> qualities.add(VideoQuality.QUALITY_360P)
-            }
+            if (height <= 0) continue
+            tiers.add(
+                VideoQuality.entries
+                    .filter { !it.isAuto && it.height <= height }
+                    .maxByOrNull { it.height }
+                    ?.height ?: continue,
+            )
         }
-        return qualities.sortedBy { it.height }
+        return VideoQuality.entries.filter { !it.isAuto && it.height in tiers }.sortedBy { it.height }
     }
 
     /**
@@ -107,17 +144,61 @@ object AuraVideo {
     private val hardwareAv1 by lazy { hasHardwareDecoderFor("video/av01") }
 
     /**
-     * Lower is better. H.264 is hardware-decoded on effectively every Android device, so it is
-     * the default; VP9 and AV1 are only worth their better compression when the device can
-     * decode them in hardware - otherwise they cost a CPU core for the entire playback.
+     * Which family a MIME type belongs to, in a fixed order so the numbers compare.
+     * HEVC is in the list although it is not offered as a choice: YouTube publishes it,
+     * and it has to rank somewhere rather than falling through as "unknown".
      */
-    private fun codecRank(stream: org.schabi.newpipe.extractor.stream.VideoStream): Int {
-        val mime = stream.format?.mimeType?.lowercase() ?: return 2
+    private fun codecFamily(mimeType: String?): Int {
+        val mime = mimeType?.lowercase() ?: return -1
         return when {
             "avc1" in mime || "avc3" in mime -> 0
             "hev1" in mime || "hvc1" in mime -> 1
-            "vp09" in mime || "vp9" in mime -> if (hardwareVp9) 1 else 3
-            "av01" in mime -> if (hardwareAv1) 1 else 4
+            "vp09" in mime || "vp9" in mime -> 2
+            "av01" in mime -> 3
+            else -> -1
+        }
+    }
+
+    private val VideoCodec.family: Int
+        get() = when (this) {
+            VideoCodec.CODEC_H264 -> 0
+            VideoCodec.CODEC_VP9 -> 2
+            VideoCodec.CODEC_AV1 -> 3
+            VideoCodec.CODEC_AUTO -> -1
+        }
+
+    /**
+     * Lower is better. H.264 is hardware-decoded on effectively every Android device, so it is
+     * the default; VP9 and AV1 are only worth their better compression when the device can
+     * decode them in hardware - otherwise they cost a CPU core for the entire playback.
+     *
+     * An explicitly chosen codec outranks all of that, including on a device that would
+     * decode it slowly. It is a preference the user set on purpose, and quietly handing
+     * back something else would leave them with no way to get the stream they asked for.
+     */
+    private fun codecRank(stream: org.schabi.newpipe.extractor.stream.VideoStream, codec: VideoCodec): Int {
+        val family = codecFamily(stream.format?.mimeType)
+        if (family < 0) return 2
+        if (!codec.isAuto) return if (family == codec.family) 0 else 1
+        return when (family) {
+            0 -> 0
+            1 -> 1
+            2 -> if (hardwareVp9) 1 else 3
+            3 -> if (hardwareAv1) 1 else 4
+            else -> 2
+        }
+    }
+
+    /** Same ranking, for a stream described by a MIME type rather than an extracted stream. */
+    private fun codecRank(mimeType: String?, codec: VideoCodec): Int {
+        val family = codecFamily(mimeType)
+        if (family < 0) return 2
+        if (!codec.isAuto) return if (family == codec.family) 0 else 1
+        return when (family) {
+            0 -> 0
+            1 -> 1
+            2 -> if (hardwareVp9) 1 else 3
+            3 -> if (hardwareAv1) 1 else 4
             else -> 2
         }
     }
@@ -137,11 +218,12 @@ object AuraVideo {
      */
     private fun bestOf(
         candidates: List<org.schabi.newpipe.extractor.stream.VideoStream>,
+        codec: VideoCodec,
     ): org.schabi.newpipe.extractor.stream.VideoStream? =
         candidates.sortedWith(
             compareByDescending<org.schabi.newpipe.extractor.stream.VideoStream> { it.height }
                 .thenBy { frameRateRank(it) }
-                .thenBy { codecRank(it) }
+                .thenBy { codecRank(it, codec) }
                 .thenByDescending { it.bitrate },
         ).firstOrNull()
 
@@ -151,43 +233,31 @@ object AuraVideo {
      */
     private fun findBestStream(
         streams: List<org.schabi.newpipe.extractor.stream.VideoStream>,
-        requireAudio: Boolean
+        requireAudio: Boolean,
+        quality: VideoQuality = currentPreferredQuality,
+        codec: VideoCodec = currentPreferredCodec,
     ): org.schabi.newpipe.extractor.stream.VideoStream? {
         if (streams.isEmpty()) return null
 
-        // Filter streams based on whether we need audio
-        val filteredStreams = if (requireAudio) {
-            streams.filter { !it.isVideoOnly() }
-        } else {
-            streams
-        }
+        // A request for audio means the muxed streams, which carry sound; a video-only
+        // stream would play silent, so it is never returned here unless nothing else is
+        // on offer at all.
+        val candidates = if (requireAudio) streams.filter { !it.isVideoOnly() }.ifEmpty { streams } else streams
 
-        // Quality preference order: try exact match first, then fall back to lower qualities only
-        val qualityOrder = when (currentPreferredQuality) {
-            VideoQuality.QUALITY_1080P -> listOf(VideoQuality.QUALITY_1080P, VideoQuality.QUALITY_720P, VideoQuality.QUALITY_480P, VideoQuality.QUALITY_360P)
-            VideoQuality.QUALITY_720P -> listOf(VideoQuality.QUALITY_720P, VideoQuality.QUALITY_480P, VideoQuality.QUALITY_360P)
-            VideoQuality.QUALITY_480P -> listOf(VideoQuality.QUALITY_480P, VideoQuality.QUALITY_360P)
-            VideoQuality.QUALITY_360P -> listOf(VideoQuality.QUALITY_360P)
-        }
+        // "Auto" takes the best the video has, which is the whole point of asking.
+        if (quality.isAuto) return bestOf(candidates, codec)
 
-        // First pass: try to find exact or closest match at or below preferred quality
-        for (quality in qualityOrder) {
-            // Find streams at exactly the preferred quality or lower (not higher)
-            val matching = filteredStreams.filter { stream ->
-                stream.height <= quality.height && stream.height > 0
-            }
-            if (matching.isNotEmpty()) {
-                // Return the highest quality that doesn't exceed preferred
-                return bestOf(matching)
-            }
+        // Tiers at or below the one asked for, highest first: a request is a ceiling, so
+        // a video that tops out at 480p answers a 1080p request with 480p rather than
+        // nothing.
+        val ladder = VideoQuality.entries
+            .filter { !it.isAuto && it.height <= quality.height }
+            .sortedByDescending { it.height }
+        for (tier in ladder) {
+            val matching = candidates.filter { it.height in 1..tier.height }
+            if (matching.isNotEmpty()) return bestOf(matching, codec)
         }
-
-        // Fallback: if no quality at or below preferred found, find any quality
-        return if (requireAudio && filteredStreams.isNotEmpty()) {
-            bestOf(filteredStreams)
-        } else {
-            bestOf(streams)
-        }
+        return bestOf(candidates, codec)
     }
 
     /**
@@ -400,7 +470,11 @@ object AuraVideo {
      * stream paired with a separate audio-only stream — that's why this
      * function returns a [VideoStreamSource.Merged] in those cases.
      */
-    suspend fun getVideoStreamSource(videoId: String): Result<VideoStreamSource> = runCatching {
+    suspend fun getVideoStreamSource(
+        videoId: String,
+        quality: VideoQuality = currentPreferredQuality,
+        codec: VideoCodec = currentPreferredCodec,
+    ): Result<VideoStreamSource> = runCatching {
         val streamInfo = NewPipeExtractor.getStreamInfo(videoId)
 
         if (streamInfo != null) {
@@ -412,11 +486,11 @@ object AuraVideo {
                 TAG,
                 "getVideoStreamSource: ${muxedVideoStreams.size} muxed, " +
                         "${videoOnlyStreams.size} video-only, ${audioStreams.size} audio-only " +
-                        "(preferred=${currentPreferredQuality.label})"
+                        "(preferred=${quality.label}, ${codec.label})"
             )
 
             fun mergedSource(): VideoStreamSource.Merged? {
-                val videoOnly = findBestStream(videoOnlyStreams, requireAudio = false)
+                val videoOnly = findBestStream(videoOnlyStreams, requireAudio = false, quality = quality, codec = codec)
                 val audioOnly = pickBestAudioStream(audioStreams)
                 val videoUrl = videoOnly?.content ?: videoOnly?.url
                 val audioUrl = audioOnly?.content ?: audioOnly?.url
@@ -443,7 +517,7 @@ object AuraVideo {
                     muxedVideoStreams,
                 )
                 for (streams in streamGroups) {
-                    val stream = findBestStream(streams, requireAudio = true)
+                    val stream = findBestStream(streams, requireAudio = true, quality = quality, codec = codec)
                     val url = stream?.content ?: stream?.url
                     if (stream != null && !url.isNullOrBlank()) {
                         Log.d(TAG, "getVideoStreamSource: Using SINGLE muxed stream ${stream.resolution}")
@@ -456,9 +530,10 @@ object AuraVideo {
                 return null
             }
 
-            // When the user asks for above 720p, prefer the video-only + audio-only
-            // merged path because muxed streams cap out below that.
-            if (currentPreferredQuality.height > 720) {
+            // Above 720p the merged path is the only one on offer, because muxed streams
+            // cap out below that - and "auto" means taking the best available, which is
+            // the same path for the same reason.
+            if (quality.isAuto || quality.height > 720) {
                 mergedSource()?.let { return@runCatching it }
                 Log.d(TAG, "getVideoStreamSource: Merged path unavailable, falling back to muxed/single")
             }
@@ -483,7 +558,11 @@ object AuraVideo {
      * Get video stream URL using NewPipeExtractor
      * Prioritizes muxed MP4 streams (video+audio, H.264) for best compatibility
      */
-    suspend fun getVideoStreamUrl(videoId: String): Result<VideoStreamResult> = runCatching {
+    suspend fun getVideoStreamUrl(
+        videoId: String,
+        quality: VideoQuality = currentPreferredQuality,
+        codec: VideoCodec = currentPreferredCodec,
+    ): Result<VideoStreamResult> = runCatching {
         val streamInfo = NewPipeExtractor.getStreamInfo(videoId)
         
         if (streamInfo != null) {
@@ -494,7 +573,7 @@ object AuraVideo {
             
             // Priority 1: Muxed MP4 streams (best compatibility with ExoPlayer)
             val mp4MuxedStreams = muxedVideoStreams.filter { isMp4Format(it.format?.mimeType) }
-            val bestMp4Muxed = findBestStream(mp4MuxedStreams, requireAudio = true)
+            val bestMp4Muxed = findBestStream(mp4MuxedStreams, requireAudio = true, quality = quality, codec = codec)
             if (bestMp4Muxed != null) {
                 val url = bestMp4Muxed.content ?: bestMp4Muxed.url
                 if (url != null) {
@@ -504,7 +583,7 @@ object AuraVideo {
             }
 
             // Priority 2: Any muxed stream matching preferred quality
-            val bestMuxedStream = findBestStream(muxedVideoStreams, requireAudio = true)
+            val bestMuxedStream = findBestStream(muxedVideoStreams, requireAudio = true, quality = quality, codec = codec)
             if (bestMuxedStream != null) {
                 val url = bestMuxedStream.content ?: bestMuxedStream.url
                 if (url != null) {
@@ -515,7 +594,7 @@ object AuraVideo {
             
             // Priority 3: Video-only MP4 streams
             val mp4VideoOnlyStreams = videoOnlyStreams.filter { isMp4Format(it.format?.mimeType) }
-            val bestMp4VideoOnly = findBestStream(mp4VideoOnlyStreams, requireAudio = false)
+            val bestMp4VideoOnly = findBestStream(mp4VideoOnlyStreams, requireAudio = false, quality = quality, codec = codec)
             if (bestMp4VideoOnly != null) {
                 val url = bestMp4VideoOnly.content ?: bestMp4VideoOnly.url
                 if (url != null) {
@@ -525,7 +604,7 @@ object AuraVideo {
             }
 
             // Priority 4: Any video-only stream
-            val bestVideoOnlyStream = findBestStream(videoOnlyStreams, requireAudio = false)
+            val bestVideoOnlyStream = findBestStream(videoOnlyStreams, requireAudio = false, quality = quality, codec = codec)
             if (bestVideoOnlyStream != null) {
                 val url = bestVideoOnlyStream.content ?: bestVideoOnlyStream.url
                 if (url != null) {
@@ -579,7 +658,7 @@ object AuraVideo {
         
         // Try MP4 muxed first, then any muxed
         for (formats in listOf(mp4MuxedFormats, muxedFormats)) {
-            val bestFormat = findBestFormat(formats, currentPreferredQuality, requireAudio = true)
+            val bestFormat = findBestFormat(formats, quality, requireAudio = true, codec = codec)
             var url = bestFormat?.url
             if (url == null && bestFormat != null && needsDeobfuscation) {
                 url = NewPipeExtractor.getStreamUrl(bestFormat, videoId)
@@ -595,7 +674,7 @@ object AuraVideo {
         val mp4AdaptiveFormats = adaptiveFormats.filter { isMp4Format(it.mimeType) }
         
         for (formats in listOf(mp4AdaptiveFormats, adaptiveFormats)) {
-            val bestFormat = findBestFormat(formats, currentPreferredQuality, requireAudio = false)
+            val bestFormat = findBestFormat(formats, quality, requireAudio = false, codec = codec)
             var url = bestFormat?.url
             if (url == null && bestFormat != null && needsDeobfuscation) {
                 url = NewPipeExtractor.getStreamUrl(bestFormat, videoId)
@@ -615,37 +694,24 @@ object AuraVideo {
     private fun findBestFormat(
         formats: List<com.auramusic.innertube.models.response.PlayerResponse.StreamingData.Format>,
         quality: VideoQuality,
-        requireAudio: Boolean
+        requireAudio: Boolean,
+        codec: VideoCodec = currentPreferredCodec,
     ): com.auramusic.innertube.models.response.PlayerResponse.StreamingData.Format? {
-        if (formats.isEmpty()) return null
+        val videoFormats = formats.filter { it.isVideo && (it.height ?: 0) > 0 }
+        if (videoFormats.isEmpty()) return null
 
-        // Filter to video formats
-        val videoFormats = formats.filter { it.isVideo && it.height != null }
+        // A request is a ceiling, so anything above it is only reached when the video
+        // offers nothing at or below - which is what "auto" asks for from the start.
+        val withinCeiling = videoFormats.filter { quality.isAuto || (it.height ?: 0) <= quality.height }
+        val pool = withinCeiling.ifEmpty { videoFormats }
 
-        // Try to find exact quality match first
-        val targetHeight = quality.height
-        val exactMatch = videoFormats.find { it.height == targetHeight }
-        if (exactMatch != null) {
-            return exactMatch
-        }
-
-        // Quality preference order: try lower qualities first before higher ones
-        val qualityOrder = when (quality) {
-            VideoQuality.QUALITY_1080P -> listOf(1080, 720, 480, 360)
-            VideoQuality.QUALITY_720P -> listOf(720, 480, 360, 1080)
-            VideoQuality.QUALITY_480P -> listOf(480, 360, 720, 1080)
-            VideoQuality.QUALITY_360P -> listOf(360, 480, 720, 1080)
-        }
-
-        for (height in qualityOrder) {
-            val match = videoFormats.find { it.height == height }
-            if (match != null) {
-                return match
+        return pool.sortedWith(
+            compareByDescending<com.auramusic.innertube.models.response.PlayerResponse.StreamingData.Format> {
+                it.height ?: 0
             }
-        }
-
-        // Last fallback: highest quality available
-        return videoFormats.maxByOrNull { it.height ?: 0 }
+                .thenBy { codecRank(it.mimeType, codec) }
+                .thenByDescending { it.bitrate },
+        ).firstOrNull()
     }
 
     suspend fun hasVideoPlayback(videoId: String): Boolean {
