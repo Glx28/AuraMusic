@@ -87,4 +87,3 @@
 # "v7.r1.invoke". Keeping the source file and line numbers is what turns the next
 # crash into something that can be traced back to this code.
 -keepattributes SourceFile,LineNumberTable
--renamesourcefileattribute SourceFile

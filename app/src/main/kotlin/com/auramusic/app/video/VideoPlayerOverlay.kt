@@ -436,7 +436,14 @@ private fun VideoExpandedPlayer(
                 onPlayNext = { VideoPlaybackManager.playNext() },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(16.dp),
+                    // The seek bar owns the bottom strip in these modes, so the tile is
+                    // lifted clear of it - and of the navigation bar underneath - rather
+                    // than sitting under the one control that is out for most of the time.
+                    .padding(
+                        end = 16.dp,
+                        bottom = WindowInsets.navigationBars.asPaddingValues()
+                            .calculateBottomPadding() + if (showControls) 96.dp else 16.dp,
+                    ),
             )
         } else if (isWideScreen) {
             // Tablets and other large screens: the video spans the full width at a
@@ -925,6 +932,7 @@ private fun VideoSurfaceWithControls(
             PlayerBottomControls(
                 uiState = uiState,
                 modifier = Modifier.align(Alignment.BottomCenter),
+                clearNavigationBar = useFullHeight,
             )
         }
 
@@ -1186,6 +1194,7 @@ private fun PlayerCenterControls(
 private fun PlayerBottomControls(
     uiState: VideoPlaybackManager.UiState,
     modifier: Modifier = Modifier,
+    clearNavigationBar: Boolean = false,
 ) {
     // Position and duration arrive as getters rather than values. The manager publishes a
     // fresh pair twice a second, and reading that state in composition would invalidate this
@@ -1198,11 +1207,18 @@ private fun PlayerBottomControls(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            // A video that fills the window draws over the navigation bar, so the seek
-            // bar has to be lifted by however much of it the system is showing. In the
-            // inline player the surrounding layout already accounts for that, and
-            // padding here as well would leave the bar floating.
-            .windowInsetsPadding(WindowInsets.navigationBars)
+            // Only when the video fills the window. There it draws over the navigation
+            // bar and the seek bar has to be lifted by however much of it the system is
+            // showing. In the ordinary player the layout around the video already leaves
+            // room for it, and lifting the bar here too left it floating above where it
+            // belongs, with a gap under it.
+            .then(
+                if (clearNavigationBar) {
+                    Modifier.windowInsetsPadding(WindowInsets.navigationBars)
+                } else {
+                    Modifier
+                },
+            )
             .background(
                 Brush.verticalGradient(
                     listOf(Color.Transparent, Color.Black.copy(alpha = 0.75f))
