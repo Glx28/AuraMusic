@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -30,7 +31,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -49,6 +52,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -111,6 +115,259 @@ import com.auramusic.app.utils.rememberPreference
 import com.auramusic.app.viewmodels.AutoPlaylistViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import com.auramusic.app.video.VideoDownloadStore
+import com.auramusic.app.video.VideoPlaybackManager
+import com.auramusic.innertube.models.Thumbnail
+import kotlinx.coroutines.delay
+
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+/** Which side of the downloads screen is being looked at. */
+enum class DownloadsKind { Music, Videos }
+
+/**
+ * The switch between downloaded songs and downloaded videos.
+ *
+ * Both are downloads, so they are reached from the same place; they are not the same
+ * thing, so they are not listed together. The switch is here rather than on a separate
+ * screen because the question behind it is "which of my downloads is this", and the
+ * answer should not need a trip somewhere else.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DownloadsKindSelector(
+    selected: DownloadsKind,
+    onSelect: (DownloadsKind) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val haptic = LocalHapticFeedback.current
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        DownloadsKind.entries.forEach { kind ->
+            Surface(
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onSelect(kind)
+                },
+                shape = RoundedCornerShape(20.dp),
+                color = if (kind == selected) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerHighest
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(vertical = 10.dp),
+                ) {
+                    Icon(
+                        painter = painterResource(
+                            if (kind == DownloadsKind.Music) R.drawable.music_note else R.drawable.slow_motion_video,
+                        ),
+                        contentDescription = null,
+                        tint = if (kind == selected) {
+                            MaterialTheme.colorScheme.onPrimary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = stringResource(
+                            if (kind == DownloadsKind.Music) R.string.downloads_music else R.string.downloads_videos,
+                        ),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (kind == selected) {
+                            MaterialTheme.colorScheme.onPrimary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * A downloaded video, in the same shape as a downloaded song so the two screens read as
+ * one screen showing two things.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DownloadedVideoRow(
+    download: VideoDownloadStore.Entry,
+    onPlay: () -> Unit,
+    onRemove: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    ListItem(
+        headlineContent = {
+            Text(
+                text = download.title,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(end = 12.dp),
+            )
+        },
+        supportingContent = {
+            Text(
+                // What it was saved at, not what it is playing at: this is the copy on
+                // the device, and a later change of preference must not rewrite it.
+                text = listOfNotNull(
+                    download.channelName.takeIf { it.isNotBlank() },
+                    download.quality.label,
+                    formatDownloadedVideoSize(download.sizeBytes),
+                ).joinToString(" • "),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        leadingContent = {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+            ) {
+                download.thumbnailUrl?.let { thumbnail ->
+                    AsyncImage(
+                        model = thumbnail,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                Icon(
+                    painter = painterResource(R.drawable.play),
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+        },
+        trailingContent = {
+            IconButton(onClick = onRemove) {
+                Icon(
+                    painter = painterResource(R.drawable.delete),
+                    contentDescription = stringResource(R.string.remove_download),
+                )
+            }
+        },
+        modifier = modifier
+            .clickable(onClick = onPlay)
+            .combinedClickable(
+                onLongClick = onRemove,
+                onClick = onPlay,
+            ),
+    )
+}
+
+/** A video on its way: what it is, how far it has got, and what can be done about it. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PendingVideoRow(
+    pending: VideoDownloadStore.Pending,
+    onRetry: () -> Unit,
+    onRemove: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    ListItem(
+        headlineContent = {
+            Text(
+                text = pending.title,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(end = 12.dp),
+            )
+        },
+        supportingContent = {
+            Text(
+                text = if (pending.failed) {
+                    stringResource(R.string.video_download_failed)
+                } else {
+                    pending.fraction?.let { "${(it * 100).toInt()}%" }
+                        ?: stringResource(R.string.video_downloading)
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        leadingContent = {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+            ) {
+                pending.thumbnailUrl?.let { thumbnail ->
+                    AsyncImage(
+                        model = thumbnail,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                if (pending.failed) {
+                    Icon(
+                        painter = painterResource(R.drawable.error),
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp),
+                    )
+                } else {
+                    val fraction = pending.fraction
+                    if (fraction == null) {
+                        // No reported length means no honest fraction: the ring turns
+                        // rather than sitting at a number that means nothing.
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(22.dp),
+                        )
+                    } else {
+                        CircularProgressIndicator(
+                            progress = { fraction },
+                            color = Color.White,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
+                }
+            }
+        },
+        trailingContent = {
+            IconButton(onClick = if (pending.failed) onRetry else onRemove) {
+                Icon(
+                    painter = painterResource(R.drawable.close),
+                    contentDescription = stringResource(
+                        if (pending.failed) R.string.video_download_failed else R.string.remove_download,
+                    ),
+                )
+            }
+        },
+        modifier = modifier,
+    )
+}
+
+private fun formatDownloadedVideoSize(bytes: Long): String {
+    if (bytes <= 0) return "0 MB"
+    val mb = bytes / (1024.0 * 1024.0)
+    return if (mb >= 1024) String.format("%.1f GB", mb / 1024.0) else String.format("%.0f MB", mb)
+}
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -291,6 +548,29 @@ fun AutoPlaylistScreen(
 
     val state = rememberLazyListState()
 
+    // Downloads arrive as two different things - songs kept out of the network and
+    // videos kept by the download service - and one list of both reads as though they
+    // were the same thing twice. Which one is being looked at is the switch's answer,
+    // remembered across visits so the screen does not open on the other one each time.
+    var downloadsKind by rememberSaveable { mutableStateOf(DownloadsKind.Music) }
+    val showingVideos = playlistType == PlaylistType.DOWNLOAD && downloadsKind == DownloadsKind.Videos
+
+    LaunchedEffect(Unit) {
+        VideoDownloadStore.load(context)
+    }
+    val videoDownloads by VideoDownloadStore.entries(context).collectAsState()
+    val downloadTick by produceState(0L) {
+        while (true) {
+            delay(1_000)
+            value++
+        }
+    }
+    val pendingVideoDownloads = remember(downloadTick, videoDownloads) {
+        VideoDownloadStore.pending(context).filter { pending ->
+            videoDownloads.none { it.videoId == pending.videoId }
+        }
+    }
+
     val isRefreshing by viewModel.isRefreshing.collectAsState()
     val pullRefreshState = rememberPullToRefreshState()
     val canRefresh = playlistType == PlaylistType.LIKE || playlistType == PlaylistType.UPLOADED
@@ -314,6 +594,56 @@ fun AutoPlaylistScreen(
             state = state,
             contentPadding = LocalPlayerAwareWindowInsets.current.asPaddingValues(),
         ) {
+            if (playlistType == PlaylistType.DOWNLOAD) {
+                item(key = "downloads_kind") {
+                    DownloadsKindSelector(
+                        selected = downloadsKind,
+                        onSelect = { downloadsKind = it },
+                        modifier = Modifier.animateItem(),
+                    )
+                }
+            }
+
+            if (showingVideos) {
+                if (videoDownloads.isEmpty() && pendingVideoDownloads.isEmpty()) {
+                    item(key = "videos_empty") {
+                        EmptyPlaceholder(
+                            icon = R.drawable.slow_motion_video,
+                            text = stringResource(R.string.video_downloads_empty),
+                        )
+                    }
+                } else {
+                    items(pendingVideoDownloads, key = { "pending_${it.videoId}" }) { pending ->
+                        PendingVideoRow(
+                            pending = pending,
+                            onRetry = { VideoDownloadStore.retry(context, pending.videoId) },
+                            onRemove = { VideoDownloadStore.get(context).remove(pending.videoId) },
+                            modifier = Modifier.animateItem(),
+                        )
+                    }
+                    items(videoDownloads, key = { it.videoId }) { download ->
+                        DownloadedVideoRow(
+                            download = download,
+                            onPlay = {
+                                VideoPlaybackManager.playWithDetails(
+                                    context = context,
+                                    videoId = download.videoId,
+                                    title = download.title,
+                                    channelName = download.channelName,
+                                    channelThumbnail = null,
+                                    thumbnails = listOfNotNull(
+                                        download.thumbnailUrl?.let { Thumbnail(it, null, null) },
+                                    ),
+                                )
+                            },
+                            onRemove = { VideoDownloadStore.get(context).remove(download.videoId) },
+                            modifier = Modifier.animateItem(),
+                        )
+                    }
+                }
+                return@LazyColumn
+            }
+
             if (songs != null) {
                 if (songs!!.isEmpty()) {
                     item(key = "empty_placeholder") {
