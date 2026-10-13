@@ -23,7 +23,15 @@ object AuraPlayerUtils {
     /**
      * Set the preferred video quality before fetching video URLs
      */
+    /**
+     * The quality playback is currently asking for, so a caller that changes it
+     * temporarily can put it back.
+     */
+    var preferredVideoQuality: VideoQuality = VideoQuality.QUALITY_720P
+        private set
+
     fun setPreferredVideoQuality(quality: VideoQuality) {
+        preferredVideoQuality = quality
         // Map PreferenceKeys.VideoQuality to AuraVideo.VideoQuality
         val auraQuality = when (quality) {
             VideoQuality.QUALITY_360P -> AuraVideo.VideoQuality.QUALITY_360P

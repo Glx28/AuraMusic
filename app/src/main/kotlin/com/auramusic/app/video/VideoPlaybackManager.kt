@@ -197,6 +197,14 @@ object VideoPlaybackManager {
         val durationMs: Long = 0,
         val error: String? = null,
         val recommendations: List<RecommendationItem> = emptyList(),
+        /**
+         * Chapters of the current video. Empty for most videos - they are not an error,
+         * they simply have none - and only worth drawing a chapter rail for when there
+         * are more than one.
+         */
+        val chapters: List<com.auramusic.innertube.VideoChapters.Chapter> = emptyList(),
+        /** Storyboard template for scrub previews; null when the client gave none. */
+        val storyboardSpec: String? = null,
         val queue: List<RecommendationItem> = emptyList(),
         val recommendationsContinuation: String? = null,
         val isLoadingRecommendations: Boolean = false,
@@ -490,6 +498,8 @@ object VideoPlaybackManager {
                     isBuffering = true,
                     error = null,
                     recommendations = emptyList(),
+                    chapters = emptyList(),
+                    storyboardSpec = null,
                     queue = emptyList(),
                     recommendationsContinuation = null,
                     isLoadingRecommendations = false,
@@ -642,6 +652,7 @@ object VideoPlaybackManager {
             // reuse the already-cached response without locking the mutex a second time —
             // this removes one extra _uiState.update recomposition at the start of every load.
             val watchMetadata = enrichSessionMetadata(videoId)
+            loadChaptersAndStoryboard(videoId)
             resolveCollaboratorChannels(videoId)
             loadRecommendations(videoId, prefetchedMetadata = watchMetadata)
             loadComments(videoId)
@@ -752,6 +763,75 @@ object VideoPlaybackManager {
      * the current video. With the next item already queued, the end of a video is a native
      * playlist advance - no reload gap - and the Up next sheet shows the real video queue.
      */
+    /**
+     * Chapters and the scrub-preview template for the current video.
+     *
+     * Both are extras on top of playback, so neither is allowed to hold anything up: a
+     * video that cannot answer plays exactly as it did before.
+     */
+    private fun loadChaptersAndStoryboard(videoId: String) {
+        val generation = loadGeneration
+        scope.launch {
+            val chapters = withContext(Dispatchers.IO) {
+                YouTube.videoChapters(videoId).getOrDefault(emptyList())
+            }
+            if (generation != loadGeneration || _uiState.value.session?.videoId != videoId) return@launch
+            if (chapters.size > 1) {
+                _uiState.update { it.copy(chapters = chapters) }
+            }
+
+            val spec = withContext(Dispatchers.IO) {
+                YouTube.videoStoryboardSpec(videoId).getOrNull()
+            }
+            if (generation != loadGeneration || _uiState.value.session?.videoId != videoId) return@launch
+            if (!spec.isNullOrBlank()) {
+                _uiState.update { it.copy(storyboardSpec = spec) }
+            }
+        }
+    }
+
+    /** The chapter playing at [timeMs], or null when this video has no chapters. */
+    fun chapterAt(timeMs: Long): com.auramusic.innertube.VideoChapters.Chapter? =
+        com.auramusic.innertube.VideoChapters.chapterAt(_uiState.value.chapters, timeMs)
+
+    /** Scrub-preview thumbnail for [timeMs], or null when this video has no storyboard. */
+    fun storyboardUrlAt(timeMs: Long): String? {
+        val state = _uiState.value
+        val spec = state.storyboardSpec ?: return null
+        val duration = state.durationMs
+        if (duration <= 0) return null
+        return com.auramusic.innertube.VideoChapters.storyboardUrl(spec, timeMs, duration)
+    }
+
+    /** Jumps to the start of a chapter. */
+    fun seekToChapter(chapter: com.auramusic.innertube.VideoChapters.Chapter) {
+        seekTo(chapter.startMs)
+    }
+
+    /**
+     * Puts a recommendation straight after the current video.
+     *
+     * The queue is rebuilt around the request so the lookahead keeps a next item to
+     * advance into, which is what makes this feel immediate rather than merely queued.
+     */
+    fun playNext(item: RecommendationItem) {
+        val state = _uiState.value
+        if (item.videoId == state.session?.videoId) return
+        val withoutIt = state.queue.filterNot { it.videoId == item.videoId }
+        val currentId = state.session?.videoId ?: return
+        // The current video stays first so the queue still describes "what plays next".
+        val current = RecommendationItem(
+            videoId = currentId,
+            title = state.session?.title.orEmpty(),
+            channelName = state.session?.channelName.orEmpty(),
+            thumbnail = state.session?.videoThumbnail,
+            durationText = null,
+        )
+        _uiState.update { it.copy(queue = listOf(current) + item + withoutIt) }
+        queuedAheadVideoId = null
+        queueUpcomingVideo()
+    }
+
     private fun queueUpcomingVideo() {
         val state = _uiState.value
         if (!state.autoplayEnabled) return

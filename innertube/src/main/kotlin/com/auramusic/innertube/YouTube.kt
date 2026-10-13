@@ -23,6 +23,7 @@ import com.auramusic.innertube.models.SongItem
 import com.auramusic.innertube.models.WatchEndpoint
 import com.auramusic.innertube.models.WatchEndpoint.WatchEndpointMusicSupportedConfigs.WatchEndpointMusicConfig.Companion.MUSIC_VIDEO_TYPE_ATV
 import com.auramusic.innertube.models.YouTubeClient
+import com.auramusic.innertube.models.YouTubeClient.Companion.ANDROID_VR_NO_AUTH
 import com.auramusic.innertube.models.YouTubeClient.Companion.WEB
 import com.auramusic.innertube.models.YouTubeClient.Companion.WEB_REMIX
 import com.auramusic.innertube.models.YouTubeClient.Companion.MOBILE
@@ -1243,6 +1244,32 @@ object YouTube {
      * related videos, channel info, description, view count and comments token.
      * The WEB_REMIX /next response used by [next] only carries YT Music queue data.
      */
+    /**
+     * Chapters for a video, read from the watch page. Empty for the many videos that do
+     * not have them, which is not a failure.
+     */
+    suspend fun videoChapters(videoId: String): Result<List<VideoChapters.Chapter>> = runCatching {
+        val body = innerTube.nextYouTube(WEB, videoId, null, null, null, null).bodyAsText()
+        VideoChapters.parseChapters(Json.parseToJsonElement(body))
+    }
+
+    /**
+     * Storyboard specification for scrub previews.
+     *
+     * Read from a client that still returns it: the web player's response no longer
+     * carries the specification, so asking it produces a "no previews available" on
+     * every video.
+     */
+    suspend fun videoStoryboardSpec(videoId: String): Result<String?> = runCatching {
+        val body = innerTube.player(
+            client = ANDROID_VR_NO_AUTH,
+            videoId = videoId,
+            playlistId = null,
+            signatureTimestamp = null,
+        ).bodyAsText()
+        VideoChapters.parseStoryboardSpec(Json.parseToJsonElement(body))
+    }
+
     suspend fun watchMetadata(videoId: String): Result<WatchMetadataResponse> =
         runCatching {
             // nextYouTube posts to www.youtube.com — the WEB client's X-Origin must

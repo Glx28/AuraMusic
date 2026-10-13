@@ -64,6 +64,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -1087,6 +1088,7 @@ private fun PlayerBottomControls(
         SlimSeekBar(
             positionMs = posMs,
             durationMs = durMs,
+            chapters = uiState.chapters,
             onSeek = { VideoPlaybackManager.seekTo(it) },
             modifier = Modifier
                 .fillMaxWidth()
@@ -1105,6 +1107,7 @@ private fun SlimSeekBar(
     durationMs: () -> Long,
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
+    chapters: List<com.auramusic.innertube.VideoChapters.Chapter> = emptyList(),
 ) {
     var scrub by remember { mutableFloatStateOf(-1f) }
     val trackWidthPx = remember { mutableIntStateOf(0) }
@@ -1121,6 +1124,10 @@ private fun SlimSeekBar(
     val trackHeight = 3.dp
     val thumbSize = 13.dp
 
+    // While scrubbing, what is under the finger: the chapter being moved into, and a
+    // thumbnail of that moment when this video has a storyboard.
+    var previewAt by remember { mutableStateOf(-1L) }
+
     Box(
         modifier = modifier
             .height(20.dp)
@@ -1132,6 +1139,7 @@ private fun SlimSeekBar(
                     },
                     onDrag = { change, _ ->
                         scrub = (change.position.x / size.width * durationSeconds).coerceIn(0f, durationSeconds)
+                        previewAt = scrub.toLong()
                         change.consume()
                     },
                     onDragEnd = {
@@ -1139,8 +1147,9 @@ private fun SlimSeekBar(
                             onSeek(it.toLong())
                             scrub = -1f
                         }
+                        previewAt = -1L
                     },
-                    onDragCancel = { scrub = -1f },
+                    onDragCancel = { scrub = -1f; previewAt = -1L },
                 )
             }
             .pointerInput(durationSeconds) {
@@ -1165,6 +1174,18 @@ private fun SlimSeekBar(
                 .clip(RoundedCornerShape(trackHeight / 2))
                 .background(MaterialTheme.colorScheme.primary)
         )
+        // Chapter boundaries, so the shape of the video is visible before scrubbing it.
+        chapters.forEach { chapter ->
+            if (chapter.startMs <= 0L || durationSeconds <= 0f) return@forEach
+            val fraction = (chapter.startMs / (durationSeconds * 1000f)).coerceIn(0f, 1f)
+            Box(
+                modifier = Modifier
+                    .graphicsLayer { translationX = (trackWidthPx.intValue * fraction) - 1.dp.toPx() }
+                    .size(width = 2.dp, height = 9.dp)
+                    .clip(RoundedCornerShape(1.dp))
+                    .background(Color.Black.copy(alpha = 0.75f)),
+            )
+        }
         Box(
             modifier = Modifier
                 .align(Alignment.CenterStart)
@@ -1182,6 +1203,66 @@ private fun SlimSeekBar(
                 .clip(CircleShape)
                 .background(Color.White)
         )
+
+        // Preview bubble, riding above the bar and following the scrubbed position.
+        androidx.compose.animation.AnimatedVisibility(
+            visible = previewAt >= 0L,
+            enter = androidx.compose.animation.fadeIn(),
+            exit = androidx.compose.animation.fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter),
+        ) {
+            val at = previewAt
+            val chapterTitle = com.auramusic.innertube.VideoChapters.chapterAt(chapters, at)?.title
+            val previewUrl = remember(at, durationSeconds) {
+                if (at < 0L || durationSeconds <= 0f) null
+                else com.auramusic.innertube.VideoChapters.storyboardUrl(
+                    spec = VideoPlaybackManager.uiState.value.storyboardSpec.orEmpty(),
+                    timeMs = at,
+                    durationMs = (durationSeconds * 1000f).toLong(),
+                )
+            }
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(bottom = 22.dp),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color.Black.copy(alpha = 0.82f),
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.padding(4.dp),
+                    ) {
+                        if (previewUrl != null) {
+                            AsyncImage(
+                                model = previewUrl,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .width(160.dp)
+                                    .height(90.dp)
+                                    .clip(RoundedCornerShape(8.dp)),
+                            )
+                        }
+                        Text(
+                            text = formatTime(at),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color.White,
+                        )
+                        chapterTitle?.let { title ->
+                            Text(
+                                text = title,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White.copy(alpha = 0.75f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 6.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1945,6 +2026,9 @@ private fun DownloadActionButton() {
     val entries by VideoDownloadStore.entries.collectAsState()
     val progressById by VideoDownloadStore.progress.collectAsState()
 
+    var showDownloadDialog by remember { mutableStateOf(false) }
+    var downloadError by remember { mutableStateOf(false) }
+
     val entry = videoId?.let { id -> entries.firstOrNull { it.videoId == id } }
     val progress = videoId?.let { progressById[it] }
 
@@ -1994,29 +2078,112 @@ private fun DownloadActionButton() {
                     else -> stringResource(R.string.video_download)
                 },
                 selected = entry != null,
-                onClick = {
-                    val id = videoId ?: return@ActionButton
-                    scope.launch {
-                        if (entry != null) {
-                            VideoDownloadStore.remove(context, id)
-                        } else {
-                            val source = AuraPlayerUtils.getVideoStreamSource(id).getOrNull()
-                            if (source == null) return@launch
-                            VideoDownloadStore.download(
-                                context = context,
-                                videoId = id,
-                                title = session?.title.orEmpty(),
-                                channelName = session?.channelName.orEmpty(),
-                                thumbnailUrl = session?.videoThumbnail,
-                                source = source,
-                                durationMs = VideoPlaybackManager.uiState.value.durationMs,
-                            )
-                        }
-                    }
-                },
+                // Asks what to fetch rather than taking a quality the user never chose -
+                // the same choice YouTube makes, and the one that decides how much of
+                // their storage this video takes.
+                onClick = { showDownloadDialog = true },
             )
         }
     }
+
+    if (showDownloadDialog) {
+        VideoDownloadDialog(
+            existing = entry,
+            onDismiss = { showDownloadDialog = false },
+            onRemove = { download ->
+                showDownloadDialog = false
+                scope.launch { VideoDownloadStore.remove(context, download.videoId) }
+            },
+            onDownload = { quality ->
+                val id = videoId ?: return@VideoDownloadDialog
+                showDownloadDialog = false
+                scope.launch {
+                    // Resolved at the chosen quality, then restored: the preference is
+                    // the player's, and picking a download must not change how playback
+                    // streams.
+                    val previous = AuraPlayerUtils.preferredVideoQuality
+                    AuraPlayerUtils.setPreferredVideoQuality(quality)
+                    val source = AuraPlayerUtils.getVideoStreamSource(id).getOrNull()
+                    AuraPlayerUtils.setPreferredVideoQuality(previous)
+                    if (source == null) {
+                        downloadError = true
+                        return@launch
+                    }
+                    VideoDownloadStore.download(
+                        context = context,
+                        videoId = id,
+                        title = session?.title.orEmpty(),
+                        channelName = session?.channelName.orEmpty(),
+                        thumbnailUrl = session?.videoThumbnail,
+                        source = source,
+                        durationMs = VideoPlaybackManager.uiState.value.durationMs,
+                    )
+                }
+            },
+        )
+    }
+}
+
+/**
+ * Download options for the current video: one entry per available quality, and a way to
+ * take an existing download back off the device.
+ */
+@Composable
+private fun VideoDownloadDialog(
+    existing: VideoDownloadStore.Entry?,
+    onDismiss: () -> Unit,
+    onRemove: (VideoDownloadStore.Entry) -> Unit,
+    onDownload: (com.auramusic.app.constants.VideoQuality) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.video_download)) },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                if (existing != null) {
+                    Text(
+                        text = stringResource(R.string.video_downloaded, formatBytes(existing.sizeBytes)),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = { onRemove(existing) }) {
+                        Icon(
+                            painter = painterResource(R.drawable.close),
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(stringResource(R.string.remove_download))
+                    }
+                    HorizontalDivider()
+                }
+                // Highest first: it is what most people want, and the sizes below it
+                // trade quality for space.
+                listOf(
+                    com.auramusic.app.constants.VideoQuality.QUALITY_1080P,
+                    com.auramusic.app.constants.VideoQuality.QUALITY_720P,
+                    com.auramusic.app.constants.VideoQuality.QUALITY_480P,
+                    com.auramusic.app.constants.VideoQuality.QUALITY_360P,
+                ).forEach { quality ->
+                    TextButton(
+                        onClick = { onDownload(quality) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            text = stringResource(R.string.video_download_quality, quality.label),
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(android.R.string.cancel)) }
+        },
+    )
 }
 
 private fun formatBytes(bytes: Long): String {

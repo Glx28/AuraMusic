@@ -60,6 +60,7 @@
     <string name="video_downloads">Video downloads</string>
     <string name="no_video_downloads">No downloaded videos</string>
     <string name="remove_download">Remove download</string>
+    <string name="video_download_quality">%1$s</string>
     <string name="open_channel">Open channel</string>
     <string name="nav_bar_position">Navigation bar position</string>
     <string name="nav_bar_position_auto">Automatic: side rail when there is room</string>

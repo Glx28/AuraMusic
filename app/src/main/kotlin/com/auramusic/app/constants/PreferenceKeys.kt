@@ -147,11 +147,16 @@ enum class AudioQuality {
     LOW,
 }
 
-enum class VideoQuality {
-    QUALITY_360P,
-    QUALITY_480P,
-    QUALITY_720P,
-    QUALITY_1080P
+enum class VideoQuality(val label: String) {
+    QUALITY_360P("360p"),
+    QUALITY_480P("480p"),
+    QUALITY_720P("720p"),
+    QUALITY_1080P("1080p");
+
+    companion object {
+        fun fromName(value: String?): VideoQuality =
+            entries.firstOrNull { it.name == value } ?: QUALITY_720P
+    }
 }
 
 val VideoQualityKey = stringPreferencesKey("videoQuality")
