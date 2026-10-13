@@ -1113,13 +1113,14 @@ private fun PlayerCenterControls(
     uiState: VideoPlaybackManager.UiState,
     modifier: Modifier = Modifier,
 ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 6.dp),
-            horizontalArrangement = Arrangement.Center
-        ) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        // The caller's alignment is what places this in the middle of the picture.
+        // Without it the row falls to the top corner of the box, which is where these
+        // controls used to live before they moved.
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center
+    ) {
             Surface(
                 onClick = { VideoPlaybackManager.playPrevious() },
                 shape = CircleShape,
@@ -1179,7 +1180,6 @@ private fun PlayerCenterControls(
                 }
             }
         }
-
 }
 
 @Composable
