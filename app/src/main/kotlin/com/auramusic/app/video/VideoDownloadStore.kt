@@ -308,7 +308,7 @@ class VideoDownloadStore @Inject constructor(
         val request = _requests.value[videoId] ?: return
         scope.launch {
             enqueue(request)
-            VideoDownloadService.start(context, videoId)
+            startServiceOnMainThread(videoId)
         }
     }
 
@@ -322,7 +322,23 @@ class VideoDownloadStore @Inject constructor(
     fun download(request: Request) {
         scope.launch {
             enqueue(request)
-            VideoDownloadService.start(context, request.videoId)
+            startServiceOnMainThread(request.videoId)
+        }
+    }
+
+    /**
+     * Starts the download service from the main thread.
+     *
+     * The service is started in the foreground, and the system counts that window from
+     * the call - not from the moment the service is created. Asking for it from a
+     * background dispatcher spends part of that window in a scheduler hop and part of
+     * it waiting for a main thread that may be busy, and the service is killed for
+     * missing the deadline. The call itself is cheap; it is the thread it is made from
+     * that matters.
+     */
+    private suspend fun startServiceOnMainThread(videoId: String) {
+        withContext(Dispatchers.Main.immediate) {
+            VideoDownloadService.start(context, videoId)
         }
     }
 

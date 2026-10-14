@@ -77,7 +77,11 @@ class VideoDownloadService : android.app.Service() {
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
+        // A channel that refuses to be created must not stop the service from running.
+        // A download that cannot announce itself still downloads; a service that dies
+        // in onCreate never reaches the foreground, and the system kills that outright
+        // rather than letting it fail quietly.
+        runCatching { createNotificationChannel() }
         // The service outlives the screen that asked for a download, so the record of
         // what was asked for is read here rather than being carried in the intent: a
         // restarted process has the intent but not the store in memory.
@@ -85,26 +89,41 @@ class VideoDownloadService : android.app.Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_DOWNLOAD -> intent.getStringExtra(EXTRA_VIDEO_ID)?.let { enqueue(it) }
-            ACTION_CANCEL -> intent.getStringExtra(EXTRA_VIDEO_ID)?.let { cancel(it) }
-            ACTION_CANCEL_ALL -> {
-                jobs.keys.toList().forEach { cancel(it) }
-            }
+        val action = intent?.action
+        val videoId = intent?.getStringExtra(EXTRA_VIDEO_ID).orEmpty()
+
+        // A service started in the foreground has to be in the foreground within a few
+        // seconds - and "a few" is measured from startForegroundService(), not from here.
+        // Anything that can come before the notification is a way to miss that window:
+        // an intent without the id, a video already being fetched, a store that has
+        // not been read yet, a slow main thread. Missing it is not a failed download,
+        // it is the process being killed, and the download it was carrying dies with
+        // it. So the notification goes up first, unconditionally, and the work
+        // follows - the progress it shows for the first second is simply unknown.
+        if (action == ACTION_DOWNLOAD) {
+            promoteForeground(videoId, downloaded = 0L, total = 0L)
+        }
+
+        when (action) {
+            ACTION_DOWNLOAD -> if (videoId.isNotBlank()) enqueue(videoId)
+            ACTION_CANCEL -> if (videoId.isNotBlank()) cancel(videoId)
+            ACTION_CANCEL_ALL -> jobs.keys.toList().forEach { cancel(it) }
             // Nothing to resume into: a restart with no job would have nothing to fetch,
             // and a half-written file is discarded rather than resumed - half a video
-            // plays silence and half a video plays a frozen frame. The service still has
-            // to reach the foreground to be allowed to say so: one started in the
-            // foreground and left without it is killed by the system, not stopped.
+            // plays silence and half a video plays a frozen frame.
             else -> {
-                promoteForeground(
-                    videoId = intent?.getStringExtra(EXTRA_VIDEO_ID).orEmpty(),
-                    downloaded = 0L,
-                    total = 0L,
-                )
                 stopForegroundCompat()
                 stopSelf()
+                return START_NOT_STICKY
             }
+        }
+
+        // A cancel that starts a service with nothing to fetch, or a download refused
+        // for want of a record of it, must not leave a service behind with no work to
+        // do and a notification claiming there is some.
+        if (jobs.isEmpty()) {
+            stopForegroundCompat()
+            stopSelf()
         }
         return START_NOT_STICKY
     }
@@ -115,11 +134,9 @@ class VideoDownloadService : android.app.Service() {
     }
 
     private fun enqueue(videoId: String) {
+        // Already being fetched: the notification for it was raised a moment ago, on
+        // the way in, and the fetch already in flight is the one that finishes it.
         if (jobs.containsKey(videoId)) return
-        // Promoted before the work starts rather than once the first byte is written.
-        // The window between startForegroundService() and the first update is short,
-        // and a fetch that spends it resolving its streams gets killed for it.
-        promoteForeground(videoId, downloaded = 0L, total = 0L)
         val job = scope.launch { runDownload(videoId) }
         jobs[videoId] = job
         job.invokeOnCompletion {
@@ -143,6 +160,10 @@ class VideoDownloadService : android.app.Service() {
     }
 
     private suspend fun runDownload(videoId: String) {
+        // The record of what was asked for is written before the service is started, but
+        // a process that has just been rebuilt has it on disk rather than in memory, and
+        // a download that cannot find itself has nothing to fetch.
+        store.load()
         val request = store.request(videoId)
         if (request == null) {
             Timber.tag(TAG).w("No record of what %s was meant to be", videoId)
@@ -328,7 +349,6 @@ class VideoDownloadService : android.app.Service() {
     }
 
     private fun promoteForeground(videoId: String, downloaded: Long, total: Long) {
-        val manager = getSystemService(NotificationManagerCompat::class.java) ?: return
         val request = store.request(videoId)
         val percent = if (total > 0) ((downloaded.toDouble() / total) * 100).toInt() else 0
         val text = when {
@@ -345,33 +365,58 @@ class VideoDownloadService : android.app.Service() {
 
             else -> getString(R.string.video_downloading)
         }
-        val builder = (request?.let { baseBuilder(it, text) }
-            ?: NotificationCompat.Builder(this, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.stat_sys_download)
-                .setContentTitle(getString(R.string.video_downloads))
-                .setContentText(text)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-                .setOngoing(true)
-                .setOnlyAlertOnce(true)
-                .setContentIntent(appIntent(videoId)))
+        // A request that is not there yet - a store read that has not landed, an intent
+        // that lost its extra - still gets a notification: the transfer is happening
+        // either way, and an unnamed one is far better than none.
+        val title = request?.title?.takeIf { it.isNotBlank() }
+            ?: videoId.takeIf { it.isNotBlank() }
+            ?: getString(R.string.video_downloads)
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setContentTitle(title)
+            .setContentText(
+                request?.channelName?.takeIf { it.isNotBlank() } ?: text,
+            )
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setOnlyAlertOnce(true)
+            .setOngoing(true)
             .setProgress(100, percent, total <= 0)
+            .setContentIntent(appIntent(videoId))
+            .apply {
+                if (videoId.isNotBlank()) {
+                    addAction(
+                        R.drawable.close,
+                        getString(android.R.string.cancel),
+                        serviceIntent(ACTION_CANCEL, videoId),
+                    )
+                }
+            }
             .build()
 
         // Promoted rather than merely posted: without it the transfer is the app's own
         // background work, and the system is entitled to end it whenever it likes. The
         // notification is never cancelled on the way - cancelling it here is what used
-        // to make a download show nothing at all.
+        // to make a download show nothing at all. Nothing above may return early: a
+        // service that has promised a notification and not delivered it is killed, and
+        // the download goes with it.
+        if (!NotificationManagerCompat.from(this).areNotificationsEnabled()) {
+            // The transfer still runs; it just cannot say so, and from the shade this
+            // is indistinguishable from a download that never started.
+            Timber.tag(TAG).w("Notifications are turned off: the download runs unannounced")
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 FOREGROUND_ID,
-                builder,
+                notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
             )
         } else {
-            startForeground(FOREGROUND_ID, builder)
+            startForeground(FOREGROUND_ID, notification)
         }
+        // Before O there is no such thing as a foreground notification, so the transfer
+        // is posted by hand - and it is posted, never cancelled.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            manager.notify(FOREGROUND_ID, builder)
+            NotificationManagerCompat.from(this).notify(FOREGROUND_ID, notification)
         }
     }
 
@@ -481,10 +526,11 @@ class VideoDownloadService : android.app.Service() {
             val intent = Intent(context, VideoDownloadService::class.java)
                 .setAction(ACTION_DOWNLOAD)
                 .putExtra(EXTRA_VIDEO_ID, videoId)
-            // The foreground flavour, because this service goes to the foreground the
-            // moment it starts. Started as an ordinary background service it is refused
-            // from the background - and where it does start, it is killed for reaching
-            // the foreground without having been asked to.
+            // The foreground flavour, and only ever for this: the service is expected to
+            // reach the foreground the moment it is started, and the system kills one
+            // that promised a notification and did not deliver it. Cancels go by
+            // startService instead - they have nothing to announce, and a service
+            // started that way has to show something it would only take straight down.
             ContextCompat.startForegroundService(context, intent)
         }
 

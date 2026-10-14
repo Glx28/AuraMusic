@@ -5,10 +5,17 @@
 
 package com.auramusic.app.video
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.os.Build
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -2252,7 +2259,26 @@ private fun DownloadActionButton() {
     val progressById by VideoDownloadStore.progress(context).collectAsState()
 
     var showDownloadDialog by remember { mutableStateOf(false) }
-    var downloadError by remember { mutableStateOf(false) }
+
+    // A download that announces itself needs permission to announce itself. Asked here,
+    // at the moment the transfer is asked for, because asking once at startup and being
+    // turned down means the prompt never comes round again - and every later download
+    // then happens in silence, which reads as the feature not working. The transfer
+    // happens either way: the permission only decides whether the system lets it say so.
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { }
+    fun askForNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) return
+        runCatching {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
     val entry = videoId?.let { id -> entries.firstOrNull { it.videoId == id } }
     val progress = videoId?.let { progressById[it] }
@@ -2329,6 +2355,7 @@ private fun DownloadActionButton() {
             onDownload = { quality, codec ->
                 val id = videoId ?: return@VideoDownloadDialog
                 showDownloadDialog = false
+                askForNotificationPermissionIfNeeded()
                 scope.launch {
                     // Resolved at the chosen quality and codec, and passed explicitly
                     // rather than through the playback preference: what gets stored on
@@ -2336,7 +2363,13 @@ private fun DownloadActionButton() {
                     // currently playing streams.
                     val source = AuraPlayerUtils.getVideoStreamSource(id, quality, codec).getOrNull()
                     if (source == null) {
-                        downloadError = true
+                        // Nothing to fetch and no transfer to start, so the button would
+                        // sit on "Download" with no explanation. Say why instead.
+                        Toast.makeText(
+                            context,
+                            R.string.video_download_unavailable,
+                            Toast.LENGTH_SHORT,
+                        ).show()
                         return@launch
                     }
                     // The record of what was asked for is written by the store before
