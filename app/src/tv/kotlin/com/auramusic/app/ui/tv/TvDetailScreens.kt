@@ -234,9 +234,13 @@ fun TvArtistDetailScreen(artistId: String, playerConnection: PlayerConnection?, 
 
     // YouTube data
     val ytArtistPage = remember { mutableStateOf<ArtistPage?>(null) }
+    // Songs that belong to an album. YouTube hands back its video shelves as songs
+    // too - the difference is the album they came from - so counting every SongItem
+    // here put the same videos in Top songs and again in their own shelf.
     val ytSongs = ytArtistPage.value?.sections
         ?.flatMap { it.items }
         ?.filterIsInstance<SongItem>()
+        ?.filter { it.album != null }
         ?.distinctBy { it.id }
         .orEmpty()
 
@@ -494,9 +498,14 @@ fun TvArtistDetailScreen(artistId: String, playerConnection: PlayerConnection?, 
 
         // YouTube sections (Albums, Videos, Featured On, Playlists By Artist) as horizontal rows
         ytArtistPage.value?.let { page ->
-            // Filter out the songs-only sections we already rendered above
+            // Everything except the song lists, which are the songs above. Asking
+            // instead whether a section holds anything that is not a SongItem is what
+            // threw the Videos shelf away: YouTube builds it out of songs that happen
+            // to be videos, so the section looked like more of the song list and was
+            // dropped with it. What separates a song from a video is not its type but
+            // whether it belongs to an album - the same test the phone uses.
             val nonSongSections = page.sections.filter { section ->
-                section.items.any { it !is SongItem }
+                (section.items.firstOrNull() as? SongItem)?.album == null
             }
             nonSongSections.forEachIndexed { sectionIndex, section ->
                 item(key = "artist_section_$sectionIndex") {

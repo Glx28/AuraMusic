@@ -6,6 +6,7 @@
 package com.auramusic.app.video
 
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -77,11 +78,7 @@ class VideoDownloadService : android.app.Service() {
 
     override fun onCreate() {
         super.onCreate()
-        // A channel that refuses to be created must not stop the service from running.
-        // A download that cannot announce itself still downloads; a service that dies
-        // in onCreate never reaches the foreground, and the system kills that outright
-        // rather than letting it fail quietly.
-        runCatching { createNotificationChannel() }
+        createVideoDownloadChannel(CHANNEL_ID)
         // The service outlives the screen that asked for a download, so the record of
         // what was asked for is read here rather than being carried in the intent: a
         // restarted process has the intent but not the store in memory.
@@ -98,10 +95,19 @@ class VideoDownloadService : android.app.Service() {
         // an intent without the id, a video already being fetched, a store that has
         // not been read yet, a slow main thread. Missing it is not a failed download,
         // it is the process being killed, and the download it was carrying dies with
-        // it. So the notification goes up first, unconditionally, and the work
-        // follows - the progress it shows for the first second is simply unknown.
+        // it. So the notification goes up first, and the work follows.
+        //
+        // When it cannot go up - every channel the listener has turned off, or the
+        // app's notifications turned off in between asking and arriving - a service
+        // that was started as a foreground one stands down at once rather than sitting
+        // there being timed out. One that was not goes on to fetch unannounced.
+        val requiresForeground =
+            intent?.getBooleanExtra(EXTRA_REQUIRES_FOREGROUND, false) == true
         if (action == ACTION_DOWNLOAD) {
-            promoteForeground(videoId, downloaded = 0L, total = 0L)
+            if (!promoteForeground(videoId, downloaded = 0L, total = 0L) && requiresForeground) {
+                stopSelf()
+                return START_NOT_STICKY
+            }
         }
 
         when (action) {
@@ -321,17 +327,53 @@ class VideoDownloadService : android.app.Service() {
     // ------------------------------------------------------------------ notification
 
     private fun createNotificationChannel() {
+        createVideoDownloadChannel(CHANNEL_ID)
+    }
+
+    private fun createVideoDownloadChannel(id: String) {
         val manager = getSystemService(NotificationManagerCompat::class.java) ?: return
-        manager.createNotificationChannel(
-            androidx.core.app.NotificationChannelCompat.Builder(
-                CHANNEL_ID,
-                androidx.core.app.NotificationManagerCompat.IMPORTANCE_LOW,
+        runCatching {
+            manager.createNotificationChannel(
+                androidx.core.app.NotificationChannelCompat.Builder(
+                    id,
+                    androidx.core.app.NotificationManagerCompat.IMPORTANCE_LOW,
+                )
+                    .setName(getString(R.string.downloading))
+                    .setDescription(getString(R.string.video_downloads))
+                    .setShowBadge(false)
+                    .build(),
             )
-                .setName(getString(R.string.downloading))
-                .setDescription(getString(R.string.video_downloads))
-                .setShowBadge(false)
-                .build(),
-        )
+        }.onFailure {
+            Timber.tag(TAG).w(it, "Channel %s could not be created", id)
+        }
+    }
+
+    /**
+     * The channel this download can actually be announced on, or null when none will do.
+     *
+     * A foreground service that cannot post its notification is not quiet about it: the
+     * system kills the process, taking the transfer with it. Two things stop a
+     * notification being posted - a channel that was never created, and a channel that
+     * exists but has been turned off - and the second cannot be undone by creating the
+     * channel again, because a channel the listener has blocked stays blocked. So a
+     * blocked channel is retried under a second name, and when even that is unusable the
+     * caller is told so here rather than finding out by crashing.
+     */
+    private fun usableChannelId(): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return CHANNEL_ID
+        val manager = NotificationManagerCompat.from(this)
+        // Notifications off for the app is the same problem as a blocked channel and no
+        // channel of ours can answer it.
+        if (!manager.areNotificationsEnabled()) return null
+        listOf(CHANNEL_ID, FALLBACK_CHANNEL_ID).forEach { id ->
+            createVideoDownloadChannel(id)
+            val channel = runCatching { manager.getNotificationChannel(id) }.getOrNull()
+            if (channel != null && channel.importance != NotificationManager.IMPORTANCE_NONE) {
+                return id
+            }
+            Timber.tag(TAG).i("Channel %s cannot carry a notification", id)
+        }
+        return null
     }
 
     /** The ongoing notification for the fetch in hand. */
@@ -348,7 +390,24 @@ class VideoDownloadService : android.app.Service() {
         promoteForeground(videoId, downloaded, total)
     }
 
-    private fun promoteForeground(videoId: String, downloaded: Long, total: Long) {
+    /**
+     * Posts the ongoing notification for the fetch in hand.
+     *
+     * True when this service is now in the foreground - or was never required to be,
+     * because nothing can be announced at all. False means it promised a notification
+     * to the system and could not keep that promise, which is something the caller has
+     * to act on rather than something to shrug at.
+     */
+    private fun promoteForeground(videoId: String, downloaded: Long, total: Long): Boolean {
+        val channelId = usableChannelId()
+        if (channelId == null) {
+            // Nothing can carry the notification, so this cannot be a foreground
+            // service: the system kills the process for one that cannot post. The
+            // download is left to run as an ordinary service instead of being taken
+            // down with it.
+            Timber.tag(TAG).w("No usable notification channel - the download cannot be announced")
+            return false
+        }
         val request = store.request(videoId)
         val percent = if (total > 0) ((downloaded.toDouble() / total) * 100).toInt() else 0
         val text = when {
@@ -371,8 +430,8 @@ class VideoDownloadService : android.app.Service() {
         val title = request?.title?.takeIf { it.isNotBlank() }
             ?: videoId.takeIf { it.isNotBlank() }
             ?: getString(R.string.video_downloads)
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
+        val notification = NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(R.drawable.download)
             .setContentTitle(title)
             .setContentText(
                 request?.channelName?.takeIf { it.isNotBlank() } ?: text,
@@ -399,26 +458,60 @@ class VideoDownloadService : android.app.Service() {
         // to make a download show nothing at all. Nothing above may return early: a
         // service that has promised a notification and not delivered it is killed, and
         // the download goes with it.
-        if (!NotificationManagerCompat.from(this).areNotificationsEnabled()) {
-            // The transfer still runs; it just cannot say so, and from the shade this
-            // is indistinguishable from a download that never started.
-            Timber.tag(TAG).w("Notifications are turned off: the download runs unannounced")
+        // Before O there is no such thing as a foreground notification: the transfer has to
+        // be posted by hand for anything to appear. It is posted, never cancelled.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            NotificationManagerCompat.from(this).notify(FOREGROUND_ID, notification)
+            return true
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForegroundSafely(
                 FOREGROUND_ID,
                 notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
             )
         } else {
-            startForeground(FOREGROUND_ID, notification)
-        }
-        // Before O there is no such thing as a foreground notification, so the transfer
-        // is posted by hand - and it is posted, never cancelled.
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            NotificationManagerCompat.from(this).notify(FOREGROUND_ID, notification)
+            startForegroundSafely(FOREGROUND_ID, notification)
         }
     }
+
+    /**
+     * Enters the foreground, or gets out of the way.
+     *
+     * A notification the system still refuses throws here rather than killing us - the
+     * daily limit on background data work, a start the system decided was not allowed,
+     * a channel that has been turned off since it was checked. None of those are worth
+     * a crash report: the download is marked failed so it can be tried again, and the
+     * service stands down rather than sitting in the foreground announcing nothing.
+     */
+    private fun startForegroundSafely(id: Int, notification: Notification, type: Int): Boolean {
+        return try {
+            startForeground(id, notification, type)
+            true
+        } catch (e: RuntimeException) {
+            Timber.tag(TAG).e(e, "Refused the foreground; the download will not be announced")
+            runCatching { stopForegroundCompat() }
+            store.markFailed(currentVideoId())
+            stopSelf()
+            false
+        }
+    }
+
+    private fun startForegroundSafely(id: Int, notification: Notification): Boolean {
+        return try {
+            startForeground(id, notification)
+            true
+        } catch (e: RuntimeException) {
+            Timber.tag(TAG).e(e, "Refused the foreground; the download will not be announced")
+            runCatching { stopForegroundCompat() }
+            store.markFailed(currentVideoId())
+            stopSelf()
+            false
+        }
+    }
+
+    /** Whatever this service was last asked to fetch, for reporting a refusal against. */
+    private fun currentVideoId(): String = jobs.keys.firstOrNull().orEmpty()
 
     /**
      * Keeps the ongoing notification describing what is still moving.
@@ -457,8 +550,8 @@ class VideoDownloadService : android.app.Service() {
     }
 
     private fun baseBuilder(request: VideoDownloadStore.Request, text: String): NotificationCompat.Builder =
-        NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
+        NotificationCompat.Builder(this, usableChannelId() ?: CHANNEL_ID)
+            .setSmallIcon(R.drawable.download)
             .setContentTitle(request.title)
             .setContentText(request.channelName.ifBlank { text })
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
@@ -511,6 +604,16 @@ class VideoDownloadService : android.app.Service() {
         private const val TAG = "VideoDownloads"
 
         const val CHANNEL_ID = "video_downloads"
+
+        /**
+         * A second name for the same channel, used when the first has been turned off.
+         *
+         * A channel the listener has blocked stays blocked - creating it again does not
+         * undo that - and a foreground service whose notification cannot be posted is
+         * not left running, it is killed. So the announcement moves to a channel they
+         * have not seen rather than being given up on.
+         */
+        private const val FALLBACK_CHANNEL_ID = "video_downloads_alt"
         private const val FOREGROUND_ID = 2
 
         /** Progress worth re-rendering the notification for: a whole percent, or a chunk. */
@@ -521,17 +624,38 @@ class VideoDownloadService : android.app.Service() {
         const val ACTION_CANCEL_ALL = "com.auramusic.app.video.CANCEL_ALL"
         const val EXTRA_VIDEO_ID = "video_id"
 
+        /**
+         * Whether this service was started expecting to reach the foreground.
+         *
+         * Carried in the intent rather than assumed, because the two ways in are
+         * opposites: a start that promised the system a notification has to keep that
+         * promise or stand down, and one that could not make the promise is free to
+         * fetch unannounced rather than be killed for silence.
+         */
+        const val EXTRA_REQUIRES_FOREGROUND = "requires_foreground"
+
         /** Asks for a video. The record of what was asked for is written before this. */
         fun start(context: Context, videoId: String) {
             val intent = Intent(context, VideoDownloadService::class.java)
                 .setAction(ACTION_DOWNLOAD)
                 .putExtra(EXTRA_VIDEO_ID, videoId)
+
             // The foreground flavour, and only ever for this: the service is expected to
             // reach the foreground the moment it is started, and the system kills one
             // that promised a notification and did not deliver it. Cancels go by
             // startService instead - they have nothing to announce, and a service
             // started that way has to show something it would only take straight down.
-            ContextCompat.startForegroundService(context, intent)
+            //
+            // The exception is a device where the app's notifications are turned off:
+            // there is nothing to foreground with, so asking to be a foreground service
+            // is asking to be killed. The transfer still happens, in the background, for
+            // as long as the system allows - and the button still counts it.
+            if (NotificationManagerCompat.from(context).areNotificationsEnabled()) {
+                intent.putExtra(EXTRA_REQUIRES_FOREGROUND, true)
+                ContextCompat.startForegroundService(context, intent)
+            } else {
+                runCatching { context.startService(intent) }
+            }
         }
 
         fun cancel(context: Context, videoId: String) {

@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -171,7 +172,11 @@ inline fun ListItem(
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
-            .height(ListItemHeight)
+            // A minimum rather than a height: 64dp is what a title and a subtitle need
+            // at the type size they were designed for, and a fixed height is what cut
+            // the second line off as soon as the text was scaled up. The row grows to
+            // fit whatever it is given; the thumbnail stays its own size either way.
+            .heightIn(min = ListItemHeight)
             .padding(horizontal = 8.dp)
             .clip(RoundedCornerShape(12.dp)) // Increased corner radius for modern look
             .background(

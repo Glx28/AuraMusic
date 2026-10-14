@@ -1702,6 +1702,14 @@ fun YouTubeSectionRow(
             items(items.distinctBy { it.id }, key = { it.id }) { item ->
                 YouTubeMediaCard(
                     item = item,
+                    // A music video is a wide picture and an album is a square one,
+                    // and showing them all in the same shape is what makes a shelf of
+                    // videos read as a shelf of album covers.
+                    thumbnailRatio = when {
+                        item is ArtistItem -> 1f
+                        item is SongItem && item.album == null -> 16f / 9f
+                        else -> 1f
+                    },
                     onClick = { onYTItemClick(item) },
                     onFocusChanged = onItemFocused,
                 )
@@ -1745,6 +1753,7 @@ fun YouTubeMediaCard(
     item: YTItem,
     onClick: () -> Unit,
     onFocusChanged: ((FocusedItemInfo?) -> Unit)? = null,
+    thumbnailRatio: Float = 1f,
 ) {
     val isFocusedState = remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -1840,7 +1849,11 @@ fun YouTubeMediaCard(
         Surface(
             onClick = onClick,
             modifier = Modifier
-                .size(width = 200.dp, height = 220.dp)
+                // Width only, deliberately: a fixed height here is what clipped the
+                // second line of text out of the card once the type was scaled up, and
+                // the card has no reason to insist on a height it cannot keep. The
+                // thumbnail keeps its own, so what grows is the writing.
+                .width(200.dp)
                 .graphicsLayer {
                     scaleX = scale
                     scaleY = scale
@@ -1861,7 +1874,10 @@ fun YouTubeMediaCard(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(150.dp)
+                        // The shape of the picture, not a number picked for album
+                        // covers: a video cropped into a square loses the frame it is
+                        // composed in, which is usually where the subject is.
+                        .aspectRatio(thumbnailRatio)
                         .clip(RoundedCornerShape(8.dp))
                         .background(MaterialTheme.colorScheme.surface),
                     contentAlignment = Alignment.Center,
@@ -1940,7 +1956,7 @@ fun YouTubeAlbumCard(
     Surface(
         onClick = onClick,
         modifier = Modifier
-            .size(width = 200.dp, height = 220.dp)
+            .width(200.dp)
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
@@ -1980,12 +1996,14 @@ fun YouTubeAlbumCard(
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Text(
                 text = album.artists?.joinToString(", ") { it.name } ?: "",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
@@ -3095,7 +3113,7 @@ fun MediaCard(
         Surface(
             onClick = onClick,
             modifier = Modifier
-                .size(width = 200.dp, height = 220.dp)
+                .width(200.dp)
                 .graphicsLayer {
                     scaleX = scale
                     scaleY = scale
@@ -3144,12 +3162,14 @@ fun MediaCard(
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
