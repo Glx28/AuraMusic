@@ -3768,6 +3768,10 @@ fun TvSettingsScreen(
       )
       val (fontScale, onFontScaleChange) = rememberPreference(FontScaleKey, defaultValue = 1.15f)
       val (fontBoldness, onFontBoldnessChange) = rememberPreference(FontBoldnessKey, defaultValue = 0f)
+      val (uiScale, onUiScaleChange) = rememberPreference(
+          com.auramusic.app.constants.UiScaleKey,
+          defaultValue = 1f,
+      )
 
      val dynamicThemeSupported = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S
      val dynamicThemeState: MutableState<Boolean> = if (dynamicThemeSupported) {
@@ -3935,9 +3939,25 @@ fun TvSettingsScreen(
                 title = "Font Size",
                 subtitle = "${(fontScale * 100).toInt()}%",
                 value = fontScale,
-                valueRange = 0.8f..1.5f,
-                steps = 6,
+                // Reaching further than a phone has to: this is read from a sofa, and
+                // the top of the phone's range is still small from there.
+                valueRange = 0.8f..2.5f,
+                steps = 16,
                 onValueChange = onFontScaleChange,
+            )
+        }
+
+        item {
+            TvSliderRow(
+                title = "Interface Size",
+                subtitle = "${(uiScale * 100).toInt()}%",
+                value = uiScale,
+                // Scales the whole screen - spacing, artwork, every target - rather
+                // than the text alone, for a television whose own display size is
+                // already at its smallest and cannot be raised any further.
+                valueRange = 0.8f..1.6f,
+                steps = 7,
+                onValueChange = onUiScaleChange,
             )
         }
 

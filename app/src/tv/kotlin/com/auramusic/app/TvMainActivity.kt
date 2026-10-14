@@ -21,8 +21,11 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.lifecycle.lifecycleScope
  import com.auramusic.app.LocalDatabase
  import com.auramusic.app.LocalPlayerConnection
@@ -36,6 +39,7 @@ import com.auramusic.app.constants.SelectedThemeColorKey
 import com.auramusic.app.constants.ContentCountryKey
 import com.auramusic.app.constants.CountryCodeToName
 import com.auramusic.app.constants.SYSTEM_DEFAULT
+import com.auramusic.app.constants.UiScaleKey
  import com.auramusic.app.db.MusicDatabase
  import com.auramusic.app.listentogether.ListenTogetherManager
 import com.auramusic.app.models.toMediaMetadata
@@ -202,6 +206,11 @@ class TvMainActivity : ComponentActivity() {
               val selectedFont by rememberPreference(SelectedFontKey, defaultValue = "DEFAULT")
               val fontScale by rememberPreference(FontScaleKey, defaultValue = 1.15f)
               val fontBoldness by rememberPreference(FontBoldnessKey, defaultValue = 0f)
+              // The television's own display size is not ours to change, and plenty of
+              // sets leave it at the smallest step with nothing to raise it. This is the
+              // app's own scaling, so the UI can be made the size it needs to be without
+              // leaving the app or waiting on the device.
+              val uiScale by rememberPreference(UiScaleKey, defaultValue = 1f)
 
               // Sync content country with YouTube so region-locked content is filtered correctly.
               val contentCountry by rememberPreference(ContentCountryKey, SYSTEM_DEFAULT)
@@ -217,10 +226,25 @@ class TvMainActivity : ComponentActivity() {
                   pureBlack = pureBlack,
                   themeColor = themeColor,
                   selectedFont = selectedFont,
-                  fontScale = fontScale,
+                  // Text follows both: the reading scale and the UI scale are two
+                  // dials on the same problem, and either alone leaves part of it
+                  // unaddressed - larger text on a layout sized for small text clips.
+                  fontScale = fontScale * uiScale,
                   fontBoldness = fontBoldness,
               ) {
+                  // Everything measured in dp - spacing, icons, touch targets - grows
+                  // with the UI scale alone. The font scale is left exactly as the
+                  // system has it, because text has already been scaled through the
+                  // typography above and scaling it again here would square the two.
+                  val baseDensity = LocalDensity.current
+                  val scaledDensity = remember(baseDensity, uiScale) {
+                      Density(
+                          density = baseDensity.density * uiScale,
+                          fontScale = baseDensity.fontScale,
+                      )
+                  }
                   CompositionLocalProvider(
+                      LocalDensity provides scaledDensity,
                       LocalDatabase provides database,
                       LocalPlayerConnection provides playerConnection
                   ) {

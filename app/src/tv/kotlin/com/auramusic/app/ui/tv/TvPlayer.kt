@@ -38,6 +38,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
+import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.MenuOpen
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
@@ -102,6 +103,7 @@ import androidx.compose.ui.zIndex
  import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
  import androidx.lifecycle.viewModelScope
  import androidx.lifecycle.compose.collectAsStateWithLifecycle
  import com.auramusic.app.utils.makeTimeString
@@ -114,7 +116,11 @@ import kotlinx.coroutines.launch
  import androidx.media3.ui.AspectRatioFrameLayout
  import androidx.media3.ui.PlayerView
  import com.auramusic.app.LocalListenTogetherManager
+ import com.auramusic.app.constants.VideoCodec
+ import com.auramusic.app.constants.VideoCodecKey
  import com.auramusic.app.constants.VideoModeEnabledKey
+ import com.auramusic.app.constants.VideoQuality
+ import com.auramusic.app.constants.VideoQualityKey
  import com.auramusic.app.models.toMediaMetadata
  import com.auramusic.app.ui.component.Lyrics
 
@@ -128,8 +134,9 @@ import kotlinx.coroutines.launch
  private const val FULLSCREEN_NEXT_SLOT = 4
  private const val FULLSCREEN_LYRICS_SLOT = 5
  private const val FULLSCREEN_QUEUE_SLOT = 6
- private const val FULLSCREEN_EXIT_SLOT = 7
- private const val FULLSCREEN_TRANSPORT_SLOTS = 8
+ private const val FULLSCREEN_QUALITY_SLOT = 7
+ private const val FULLSCREEN_EXIT_SLOT = 8
+ private const val FULLSCREEN_TRANSPORT_SLOTS = 9
 
  @Composable
  private fun TvPlayerControlButton(
@@ -292,6 +299,107 @@ import kotlinx.coroutines.launch
   }
 
 /**
+ * The resolutions a television is asked to fetch, best first.
+ *
+ * Auto is offered because a household connection is not ours to measure, but the
+ * fixed steps above 720p are the reason this control exists at all: YouTube only
+ * ships separate video and audio streams past that point, which is why 1080p and
+ * above look sharper than the default rather than merely larger.
+ */
+private val QUALITY_OPTIONS = listOf(
+    VideoQuality.QUALITY_AUTO,
+    VideoQuality.QUALITY_2160P,
+    VideoQuality.QUALITY_1440P,
+    VideoQuality.QUALITY_1080P,
+    VideoQuality.QUALITY_720P,
+    VideoQuality.QUALITY_480P,
+    VideoQuality.QUALITY_360P,
+)
+
+/** One resolution in the quality panel: a row the remote can land on and press. */
+@Composable
+private fun TvQualityOption(
+    quality: VideoQuality,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    focusRequester: FocusRequester? = null,
+    onFocused: () -> Unit = {},
+) {
+    val isFocused = remember { mutableStateOf(false) }
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val bringIntoViewScope = rememberCoroutineScope()
+    val borderColor = when {
+        isFocused.value -> MaterialTheme.colorScheme.primary
+        isSelected -> MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+        else -> Color.Transparent
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .border(2.dp, borderColor, RoundedCornerShape(10.dp))
+            .background(
+                if (isFocused.value) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+                } else if (isSelected) {
+                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                } else {
+                    MaterialTheme.colorScheme.surface.copy(alpha = 0.3f)
+                },
+            )
+            .bringIntoViewRequester(bringIntoViewRequester)
+            .onFocusChanged {
+                isFocused.value = it.isFocused
+                if (it.isFocused) {
+                    bringIntoViewScope.launch {
+                        runCatching { bringIntoViewRequester.bringIntoView() }
+                    }
+                    onFocused()
+                }
+            }
+            .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
+            .focusable()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = when {
+                    quality.isAuto -> "Auto"
+                    else -> quality.label
+                },
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                color = if (isSelected || isFocused.value) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+            )
+            Text(
+                text = when {
+                    quality.isAuto -> "Let the app choose"
+                    quality.height >= 1080 -> "Sharper, needs more bandwidth"
+                    quality.height == 720 -> "Default"
+                    else -> "Smoother, uses less data"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (isSelected) {
+            Icon(
+                painter = painterResource(R.drawable.check),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(22.dp),
+            )
+        }
+    }
+}
+
+/**
  * Media3 PlayerView hosting the active player plus the switch/buffering overlays.
  * Exactly one instance may be composed at a time (split layout vs. fullscreen
  * layer): the surface claims the video output, so the two must never coexist.
@@ -388,17 +496,22 @@ fun TvPlayerScreen(
     // The queue opened over the media is the first thing Back closes: leaving it
     // open and dropping straight out of fullscreen throws away the way out.
     var fullscreenQueueOpen by remember { mutableStateOf(false) }
+    var videoQualityPanelOpen by remember { mutableStateOf(false) }
     BackHandler {
         when {
             fullscreenQueueOpen -> fullscreenQueueOpen = false
+            videoQualityPanelOpen -> videoQualityPanelOpen = false
             isFullScreen -> onFullScreenChange(false)
             else -> onBackClick()
         }
     }
-    // Leaving fullscreen takes the panel with it, so it cannot reappear over the
+    // Leaving fullscreen takes the panels with it, so neither can reappear over the
     // split layout with no way to close it.
     LaunchedEffect(isFullScreen) {
-        if (!isFullScreen) fullscreenQueueOpen = false
+        if (!isFullScreen) {
+            fullscreenQueueOpen = false
+            videoQualityPanelOpen = false
+        }
     }
     var duration by remember { mutableStateOf(0L) }
     var currentPosition by remember { mutableStateOf(0L) }
@@ -444,6 +557,8 @@ fun TvPlayerScreen(
     val queueItemFocusers = remember { mutableStateMapOf<String, FocusRequester>() }
     fun queueFocuserFor(mediaId: String): FocusRequester =
         queueItemFocusers.getOrPut(mediaId) { FocusRequester() }
+    val qualityOptionFocusers = remember { mutableStateMapOf<String, FocusRequester>() }
+    val qualityCloseFocus = remember { FocusRequester() }
     // Which button the remote is on. Kept as state rather than read off focus so the
     // row can move focus without racing the focus system's own bookkeeping.
     var focusedTransport by remember { mutableStateOf(FULLSCREEN_PLAY_SLOT) }
@@ -477,6 +592,21 @@ fun TvPlayerScreen(
     val serviceSleepTimer = effectivePlayerConnection?.service?.sleepTimer
     val sleepTimerActive = serviceSleepTimer?.isActive == true
 
+    // The resolution the video is fetched at. A television is watched from across a
+    // room, where the phone-sized 720p default is visibly soft, so this is chosen from
+    // the player rather than left in settings nobody finds.
+    val (videoQualityName, onVideoQualityNameChange) = com.auramusic.app.utils.rememberPreference(
+        VideoQualityKey,
+        defaultValue = VideoQuality.QUALITY_1080P.name,
+    )
+    val (videoCodecName, _) = com.auramusic.app.utils.rememberPreference(
+        VideoCodecKey,
+        defaultValue = VideoCodec.CODEC_AUTO.name,
+    )
+    var videoQualityMessage by remember { mutableStateOf<String?>(null) }
+    val qualityScope = rememberCoroutineScope()
+    val videoQuality = VideoQuality.fromName(videoQualityName)
+
     val currentLyrics by (effectivePlayerConnection?.currentLyrics?.collectAsState(initial = null)
         ?: remember { mutableStateOf(null) })
 
@@ -500,7 +630,10 @@ fun TvPlayerScreen(
             add(FULLSCREEN_FORWARD_SLOT)
             add(FULLSCREEN_NEXT_SLOT)
             if (!videoModeEnabled) add(FULLSCREEN_LYRICS_SLOT)
+            // Quality sits next to the queue: both are "how this plays" rather than
+            // "what plays next", and both open over the media.
             add(FULLSCREEN_QUEUE_SLOT)
+            add(FULLSCREEN_QUALITY_SLOT)
             add(FULLSCREEN_EXIT_SLOT)
         }
     }
@@ -520,6 +653,75 @@ fun TvPlayerScreen(
         focusedTransport = slot
         wakeControls()
         runCatching { transportFocus[slot].requestFocus() }
+    }
+
+    // Opening the panel puts the remote on the resolution in use, so left and right
+    // move between neighbouring options rather than starting from the top of a list.
+    LaunchedEffect(videoQualityPanelOpen) {
+        if (!videoQualityPanelOpen) return@LaunchedEffect
+        wakeControls()
+        delay(150)
+        runCatching { qualityOptionFocusers[videoQuality.name]?.requestFocus() }
+    }
+
+    /**
+     * Fetches the video again at [quality].
+     *
+     * The stream already loaded is the one that was asked for when this song started,
+     * so writing the preference changes what comes next and not what is on screen. The
+     * switch is therefore forced - video off, then on - which re-resolves the source
+     * against the new preference. A video that has nothing at the resolution asked for
+     * says so and stays where it was: a soft picture is better than a stopped one, and
+     * a resolution that is quietly downgraded is better told than assumed.
+     */
+    fun applyVideoQuality(quality: VideoQuality) {
+        if (quality == videoQuality) {
+            videoQualityPanelOpen = false
+            return
+        }
+        val videoId = pc?.mediaMetadata?.value?.id
+        videoQualityPanelOpen = false
+        qualityScope.launch {
+            // The preference is written whatever happens: it is what the next video is
+            // fetched at, and a resolution this one lacks is not a wrong choice for
+            // the one after it.
+            onVideoQualityNameChange(quality.name)
+            com.auramusic.app.utils.AuraPlayerUtils.setPreferredVideoQuality(quality)
+
+            if (videoId == null) {
+                // Nothing playing to re-fetch: the setting is in place and takes
+                // effect on its own when there is a video to fetch it for.
+                return@launch
+            }
+            val wasVideoMode = videoModeEnabled
+            if (wasVideoMode) {
+                // Back to the audio item first: the service refuses a second switch to
+                // the mode it is already in, and the stream it holds is the old one.
+                pc?.enableVideoMode(false)
+                delay(150)
+            }
+
+            val resolved = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.auramusic.app.utils.AuraPlayerUtils
+                    .getVideoStreamSource(videoId, quality, VideoCodec.fromName(videoCodecName))
+                    .isSuccess
+            }
+            if (resolved) {
+                pc?.enableVideoMode(true)
+            } else {
+                // Asked for more than this video has. Say so rather than silently
+                // showing something else - and leave the video off rather than
+                // re-running the switch that already failed.
+                videoQualityMessage = "${quality.label} unavailable for this video"
+                delay(2200)
+                videoQualityMessage = null
+                if (wasVideoMode) {
+                    com.auramusic.app.utils.AuraPlayerUtils.setPreferredVideoQuality(videoQuality)
+                    onVideoQualityNameChange(videoQuality.name)
+                    pc?.enableVideoMode(true)
+                }
+            }
+        }
     }
 
     LaunchedEffect(isFullScreen) {
@@ -1066,6 +1268,17 @@ fun TvPlayerScreen(
                             size = sideControlSize,
                         )
 
+                        // The same resolution choice as fullscreen, in the split view too: a soft
+                        // video is a problem whether or not it is filling the screen,
+                        // and the control belongs beside the picture it changes.
+                        TvPlayerControlButton(
+                            onClick = { videoQualityPanelOpen = true },
+                            icon = Icons.Filled.HighQuality,
+                            contentDescription = "Video quality",
+                            tint = MaterialTheme.colorScheme.primary,
+                            size = sideControlSize,
+                        )
+
                         val isLiked = currentSong?.song?.liked == true
                         TvPlayerControlButton(
                             onClick = { pc?.toggleLike() },
@@ -1159,6 +1372,27 @@ fun TvPlayerScreen(
             }
             }
 
+            // A resolution is worth naming when it has just changed: the picture is easier to
+            // judge against what was asked for than against what it was.
+            videoQualityMessage?.let { message ->
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .zIndex(6f)
+                        .padding(top = 24.dp),
+                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.inverseSurface.copy(alpha = 0.95f),
+                    tonalElevation = 8.dp,
+                ) {
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.inverseOnSurface,
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+                    )
+                }
+            }
+
             if (isFullScreen) {
                 // Full-bleed media with auto-hiding controls overlaid. The split
                 // layout is not composed in this state, so this is the only
@@ -1178,12 +1412,11 @@ fun TvPlayerScreen(
                             // reaches either end.
                             when (event.key) {
                                 Key.DirectionLeft, Key.DirectionRight -> {
-                                    // The open queue is a panel of its own: left and
-                                    // right stay inside it rather than walking back to
-                                    // a row that is behind it. Centre is left alone so
-                                    // the row under the remote is the one that is
-                                    // pressed when the listener presses select.
-                                    if (fullscreenQueueOpen) {
+                                    // An open panel is its own place: left and right
+                                    // stay inside it rather than walking back to a row
+                                    // behind it. Centre is left alone so the row under
+                                    // the remote is the one that is pressed.
+                                    if (fullscreenQueueOpen || videoQualityPanelOpen) {
                                         true
                                     } else {
                                         moveTransportFocus(
@@ -1439,6 +1672,29 @@ fun TvPlayerScreen(
                                     wakeControls()
                                 },
                             )
+                            // Resolution, for the same reason it exists on the phone: the
+                            // picture is only as sharp as the stream it was fetched at,
+                            // and from a sofa the default is not sharp enough.
+                            TvPlayerControlButton(
+                                onClick = {
+                                    videoQualityPanelOpen = !videoQualityPanelOpen
+                                    if (!videoQualityPanelOpen) {
+                                        focusTransportSlot(FULLSCREEN_QUALITY_SLOT)
+                                    }
+                                },
+                                icon = Icons.Filled.HighQuality,
+                                contentDescription = "Video quality",
+                                tint = if (videoQualityPanelOpen) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    Color.White
+                                },
+                                focusRequester = transportFocus[FULLSCREEN_QUALITY_SLOT],
+                                onFocused = {
+                                    focusedTransport = FULLSCREEN_QUALITY_SLOT
+                                    wakeControls()
+                                },
+                            )
                             TvPlayerControlButton(
                                 onClick = { onFullScreenChange(false) },
                                 painter = painterResource(R.drawable.fullscreen_exit),
@@ -1451,6 +1707,7 @@ fun TvPlayerScreen(
                             )
                         }
                     }
+
 
                     if (fullscreenQueueOpen) {
                         // The queue, folded out over the media. It takes the whole right
@@ -1550,6 +1807,82 @@ fun TvPlayerScreen(
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (videoQualityPanelOpen) {
+                // Resolutions, over the media rather than in settings: the point
+                // of choosing is to see whether it helped, and that cannot be
+                // judged from a screen two rooms away in the settings menu.
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .width(420.dp)
+                        .zIndex(5f),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f),
+                    tonalElevation = 6.dp,
+                ) {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                                .padding(start = 20.dp, end = 12.dp, top = 14.dp, bottom = 14.dp),
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Video quality",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = "Restart the video to change",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            TvPlayerControlButton(
+                                onClick = {
+                                    videoQualityPanelOpen = false
+                                    focusTransportSlot(FULLSCREEN_QUALITY_SLOT)
+                                },
+                                icon = Icons.Filled.Close,
+                                contentDescription = "Close quality",
+                                size = 48.dp,
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                focusRequester = qualityCloseFocus,
+                                onFocused = { wakeControls() },
+                            )
+                        }
+
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            items(
+                                count = QUALITY_OPTIONS.size,
+                                key = { QUALITY_OPTIONS[it].name },
+                            ) { index ->
+                                val option = QUALITY_OPTIONS[index]
+                                TvQualityOption(
+                                    quality = option,
+                                    isSelected = option == videoQuality,
+                                    onClick = { applyVideoQuality(option) },
+                                    focusRequester = qualityOptionFocusers.getOrPut(option.name) {
+                                        FocusRequester()
+                                    },
+                                    onFocused = { wakeControls() },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp),
+                                )
                             }
                         }
                     }

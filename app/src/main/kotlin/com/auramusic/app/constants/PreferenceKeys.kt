@@ -21,6 +21,17 @@ val SelectedThemeColorKey = intPreferencesKey("selectedThemeColor")
 val SelectedFontKey = stringPreferencesKey("selectedFont")
 val FontScaleKey = floatPreferencesKey("fontScale")
 val FontBoldnessKey = floatPreferencesKey("fontBoldness")
+
+/**
+ * Scales everything the app draws, not only its text.
+ *
+ * The system display size is a setting of the device and many televisions ship with
+ * it at the smallest step and no way to raise it further, which leaves a text-heavy
+ * app reading from across the room at a glance. This is the app's own answer to that,
+ * and it is deliberately separate from [FontScaleKey]: one is for reading, the other
+ * is for seeing.
+ */
+val UiScaleKey = floatPreferencesKey("uiScale")
 val DarkModeKey = stringPreferencesKey("darkMode")
 val PureBlackKey = booleanPreferencesKey("pureBlack")
 val PureBlackMiniPlayerKey = booleanPreferencesKey("pureBlackMiniPlayer")
