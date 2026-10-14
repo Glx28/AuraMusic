@@ -422,7 +422,7 @@
     <string name="action_login">Se connecter</string>
     <string name="login">Connexion</string>
     <string name="not_logged_in">Non connecté</string>
-    <string name="login_failed">Échec de la connexion</string>
+    <string name="login_failed">La connexion n\'a pas abouti</string>
     <string name="token_adv_login_description">Saisissez votre jeton d\'authentification</string>
     <string name="advanced_login">Connexion avancée</string>
     <string name="token_shown">Jeton affiché</string>
@@ -1093,4 +1093,12 @@
     <string name="video_player_hide_replies">Masquer %1$d réponses</string>
     <string name="video_player_more_replies">Afficher plus de réponses</string>
     <string name="video_player_pinned">Épinglé</string>
+    <string name="video_download_quality">%1$s</string>
+    <string name="email">E-mail</string>
+    <string name="video_codec">Codec</string>
+    <string name="video_codec_hint">Un codec que l\'appareil ne peut pas décoder au niveau matériel entraînera des saccades lors de la lecture. Si une option n\'émet aucun son ou n\'est pas prise en charge, laissez-la sur « Auto ».</string>
+    <string name="video_download_format">%1$s · %2$s</string>
+    <string name="video_player_watched">Vu</string>
+    <string name="video_downloads">Téléchargements de vidéos</string>
+    <string name="no_video_downloads">Aucune vidéo téléchargée</string>
 </resources>
