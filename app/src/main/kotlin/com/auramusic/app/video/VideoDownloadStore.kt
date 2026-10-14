@@ -23,9 +23,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.io.File
@@ -111,6 +114,10 @@ class VideoDownloadStore @Inject constructor(
     private val _progress = MutableStateFlow<Map<String, Progress>>(emptyMap())
     private val _loaded = MutableStateFlow(false)
 
+    // Declared with the state it serves: [pendingFlow] is built from it, and every
+    // write that outlives the screen that asked for it happens on it.
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     private fun downloadsDir(): File =
         File(context.filesDir, DIR_NAME).apply { if (!exists()) mkdirs() }
 
@@ -132,6 +139,18 @@ class VideoDownloadStore @Inject constructor(
     fun request(videoId: String): Request? = _requests.value[videoId]
 
     fun totalBytes(): Long = _entries.value.sumOf { it.sizeBytes }
+
+    /**
+     * Everything the video downloads occupy on the device right now.
+     *
+     * Measured off the folder rather than off the recorded entries, so a transfer still
+     * arriving and a file left behind by an entry that was deleted are both counted -
+     * the question storage settings asks is how much room the videos are taking, and
+     * that is the space they are taking.
+     */
+    fun diskUsage(): Long = runCatching {
+        downloadsDir().walkTopDown().filter { it.isFile }.sumOf { it.length() }
+    }.getOrDefault(0L)
 
     fun progressFor(videoId: String): Progress? = _progress.value[videoId]
 
@@ -228,23 +247,55 @@ class VideoDownloadStore @Inject constructor(
     }
 
     /** Downloads still on their way, as the screens show them. */
-    fun pending(): List<Pending> = _requests.value.values.mapNotNull { request ->
-        val progress = _progress.value[request.videoId]
+    fun pending(): List<Pending> = buildPending(_requests.value, _progress.value)
+
+    /** One download, as the screens show it, or null when it is not one any more. */
+    private fun buildPending(
+        request: Request,
+        state: Progress?,
+        arrived: Set<String>,
+    ): Pending? {
         // Asked for and already finished: it is an entry now, not something pending.
-        if (entry(request.videoId) != null) return@mapNotNull null
-        Pending(
+        if (request.videoId in arrived) return null
+        return Pending(
             videoId = request.videoId,
             title = request.title,
             channelName = request.channelName,
             thumbnailUrl = request.thumbnailUrl,
             // Left out when there is no length to measure against: a ring that jumps
             // between ticks is worse than one that simply turns.
-            fraction = progress
+            fraction = state
                 ?.takeIf { it.totalBytes > 0 && !it.done && !it.failed }
                 ?.let { (it.downloadedBytes.toFloat() / it.totalBytes).coerceIn(0f, 1f) },
-            failed = progress?.failed == true,
+            failed = state?.failed == true,
+            downloadedBytes = state?.downloadedBytes ?: 0L,
+            totalBytes = state?.totalBytes ?: 0L,
         )
     }
+
+    private fun buildPending(
+        requests: Map<String, Request>,
+        progress: Map<String, Progress>,
+        entries: List<Entry> = _entries.value,
+    ): List<Pending> {
+        val arrived = entries.mapTo(mutableSetOf()) { it.videoId }
+        return requests.values.mapNotNull { request ->
+            buildPending(request, progress[request.videoId], arrived)
+        }
+    }
+
+    /**
+     * The same list, as something a screen can watch.
+     *
+     * [pending] is a plain call, which left the downloads screen polling once a second
+     * to notice progress the service was already reporting. This is the same answer,
+     * delivered when it changes - so a bar moves as the bytes land rather than once a
+     * second whether or not anything happened.
+     */
+    val pendingFlow: StateFlow<List<Pending>> =
+        combine(_requests, _progress, _entries) { requests, progress, entries ->
+            buildPending(requests, progress, entries)
+        }.stateIn(scope, SharingStarted.Eagerly, emptyList())
 
     /**
      * Starts a failed download again, at the quality and codec it was asked for.
@@ -275,7 +326,6 @@ class VideoDownloadStore @Inject constructor(
         }
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** Takes a video off the device, including anything still downloading. */
     fun remove(videoId: String) {
@@ -297,6 +347,26 @@ class VideoDownloadStore @Inject constructor(
         _entries.value = _entries.value.filterNot { it.videoId == videoId }
         _requests.value = _requests.value - videoId
         _progress.value = _progress.value - videoId
+        scope.launch {
+            persist()
+            persistRequests()
+        }
+    }
+
+    /**
+     * Takes every video off the device.
+     *
+     * Used by storage settings, where the question is "how do I get this space back"
+     * rather than "remove that one video". Anything half-written goes with it: a file
+     * that was never finished was never playable, so it is only taking up room.
+     */
+    fun removeEverything() {
+        runCatching {
+            downloadsDir().listFiles()?.forEach { it.deleteRecursively() }
+        }
+        _entries.value = emptyList()
+        _requests.value = emptyMap()
+        _progress.value = emptyMap()
         scope.launch {
             persist()
             persistRequests()
@@ -419,6 +489,10 @@ class VideoDownloadStore @Inject constructor(
         val thumbnailUrl: String?,
         val fraction: Float?,
         val failed: Boolean,
+        /** What has landed so far, so a row can say how much rather than only how much. */
+        val downloadedBytes: Long = 0L,
+        /** The length the service was told to expect, 0 when nobody would say. */
+        val totalBytes: Long = 0L,
     )
 
     companion object {
@@ -456,6 +530,20 @@ class VideoDownloadStore @Inject constructor(
         fun progress(context: Context): StateFlow<Map<String, Progress>> = get(context)._progress
 
         fun pending(context: Context): List<Pending> = get(context).pending()
+
+        fun pendingFlow(context: Context): StateFlow<List<Pending>> = get(context).pendingFlow
+
+        /** Videos occupying this much room on the device, finished or still arriving. */
+        fun diskUsage(context: Context): Long = get(context).diskUsage()
+
+        /** Takes every video off the device, including the ones still on their way. */
+        fun removeAll(context: Context) {
+            val store = get(context)
+            // Anything still moving has to be stopped first: the files are about to go,
+            // and a service still writing them would put them back.
+            store.pending().forEach { VideoDownloadService.cancel(context, it.videoId) }
+            store.removeEverything()
+        }
 
         fun download(context: Context, request: Request) = get(context).download(request)
 

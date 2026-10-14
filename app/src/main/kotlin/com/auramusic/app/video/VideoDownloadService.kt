@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import androidx.media3.common.util.Util
 import com.auramusic.app.MainActivity
 import com.auramusic.app.R
@@ -55,6 +56,10 @@ class VideoDownloadService : android.app.Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = mutableMapOf<String, Job>()
 
+    /** What the ongoing notification last said, so it is not rebuilt for nothing. */
+    @Volatile private var lastNotifiedPercent: Int = -1
+    @Volatile private var lastNotifiedBytes: Long = 0L
+
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .proxy(com.auramusic.innertube.YouTube.proxy)
@@ -73,6 +78,10 @@ class VideoDownloadService : android.app.Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // The service outlives the screen that asked for a download, so the record of
+        // what was asked for is read here rather than being carried in the intent: a
+        // restarted process has the intent but not the store in memory.
+        scope.launch { store.load() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -84,8 +93,18 @@ class VideoDownloadService : android.app.Service() {
             }
             // Nothing to resume into: a restart with no job would have nothing to fetch,
             // and a half-written file is discarded rather than resumed - half a video
-            // plays silence and half a video plays a frozen frame.
-            else -> stopSelf()
+            // plays silence and half a video plays a frozen frame. The service still has
+            // to reach the foreground to be allowed to say so: one started in the
+            // foreground and left without it is killed by the system, not stopped.
+            else -> {
+                promoteForeground(
+                    videoId = intent?.getStringExtra(EXTRA_VIDEO_ID).orEmpty(),
+                    downloaded = 0L,
+                    total = 0L,
+                )
+                stopForegroundCompat()
+                stopSelf()
+            }
         }
         return START_NOT_STICKY
     }
@@ -97,6 +116,10 @@ class VideoDownloadService : android.app.Service() {
 
     private fun enqueue(videoId: String) {
         if (jobs.containsKey(videoId)) return
+        // Promoted before the work starts rather than once the first byte is written.
+        // The window between startForegroundService() and the first update is short,
+        // and a fetch that spends it resolving its streams gets killed for it.
+        promoteForeground(videoId, downloaded = 0L, total = 0L)
         val job = scope.launch { runDownload(videoId) }
         jobs[videoId] = job
         job.invokeOnCompletion {
@@ -105,6 +128,10 @@ class VideoDownloadService : android.app.Service() {
                 if (jobs.isEmpty()) {
                     stopForegroundCompat()
                     stopSelf()
+                } else {
+                    // One is still moving, so the notification keeps describing the
+                    // transfer rather than stopping at a video that has finished.
+                    updateForeground()
                 }
             }
         }
@@ -139,11 +166,32 @@ class VideoDownloadService : android.app.Service() {
                 )
             }
 
-            // Sizes are learned as the responses arrive, so the total starts at zero and
-            // the notification shows an unknown length until then - which is honest, and
-            // better than a bar that fills towards a number that was never real.
+            // How big the video is has to be known before the first byte is written, or
+            // there is nothing for a percentage to be a percentage of. The lengths are
+            // asked for up front - one cheap request per part, answered from headers
+            // and closed again - so the bar moves smoothly from the first second
+            // instead of sitting at nothing until the last stream begins.
+            val partLengths = parts.associate { part ->
+                part.name to remoteLength(part.url)
+            }.toMutableMap()
+            val partDownloaded = parts.associate { it.name to 0L }.toMutableMap()
             var downloaded = 0L
-            var total = 0L
+
+            /**
+             * The whole video as far as it is currently known.
+             *
+             * A part that arrives without announcing a length is counted by what has
+             * landed from it, so a download nobody could measure still shows movement
+             * rather than a bar frozen at zero.
+             */
+            fun totalBytes(): Long {
+                val declared = partLengths.values.sum()
+                val undeclared = parts
+                    .filter { (partLengths[it.name] ?: 0L) <= 0L }
+                    .sumOf { partDownloaded[it.name] ?: 0L }
+                val total = declared + undeclared
+                return if (total > 0L) total else downloaded
+            }
             val written = mutableListOf<String>()
 
             for (part in parts) {
@@ -153,6 +201,9 @@ class VideoDownloadService : android.app.Service() {
                     if (!response.isSuccessful) error("HTTP ${response.code}")
                     val body = response.body ?: error("Empty body")
                     val contentLength = body.contentLength().coerceAtLeast(0L)
+                    // The response knows its own length, so the up-front estimate is
+                    // replaced by the real one the moment there is one.
+                    if (contentLength > 0L) partLengths[part.name] = contentLength
                     body.byteStream().use { input ->
                         temporary.outputStream().buffered().use { output ->
                             val buffer = ByteArray(64 * 1024)
@@ -160,12 +211,13 @@ class VideoDownloadService : android.app.Service() {
                             while (input.read(buffer).also { read = it } != -1) {
                                 output.write(buffer, 0, read)
                                 downloaded += read
+                                partDownloaded[part.name] = (partDownloaded[part.name] ?: 0L) + read
+                                val total = totalBytes()
                                 store.updateProgress(videoId, downloaded, total)
-                                notifyProgress(request, downloaded, total)
+                                notifyProgress(videoId, downloaded, total)
                             }
                         }
                     }
-                    total += contentLength
                 }
                 // Renamed out of the temporary name only once it is whole, so a file that
                 // is still arriving can never be mistaken for one that is finished.
@@ -212,6 +264,39 @@ class VideoDownloadService : android.app.Service() {
 
     private class Part(val name: String, val url: String)
 
+    /**
+     * How long the remote says the file at [url] is, or 0 when it will not say.
+     *
+     * Asked with a single ranged byte where the CDN allows it, because that is the
+     * cheapest way to be told a length without starting the transfer; a plain header
+     * request is tried first and a refused one falls back to that.
+     */
+    private fun remoteLength(url: String): Long {
+        runCatching {
+            client.newCall(Request.Builder().url(url).head().build()).execute().use { response ->
+                if (response.isSuccessful) {
+                    response.header("Content-Length")?.toLongOrNull()?.takeIf { it > 0L }
+                } else {
+                    null
+                }
+            }
+        }.getOrNull()?.takeIf { it > 0L }?.let { return it }
+
+        return runCatching {
+            client.newCall(
+                Request.Builder().url(url).header("Range", "bytes=0-0").build(),
+            ).execute().use { response ->
+                // A ranged answer carries the whole length in Content-Range rather than
+                // in Content-Length, which would only ever be the one byte asked for.
+                response.header("Content-Range")
+                    ?.substringAfterLast('/')
+                    ?.toLongOrNull()
+                    ?.takeIf { it > 0L }
+                    ?: response.header("Content-Length")?.toLongOrNull()?.takeIf { it > 0L }
+            }
+        }.getOrNull() ?: 0L
+    }
+
     // ------------------------------------------------------------------ notification
 
     private fun createNotificationChannel() {
@@ -229,48 +314,99 @@ class VideoDownloadService : android.app.Service() {
     }
 
     /** The ongoing notification for the fetch in hand. */
-    private fun notifyProgress(request: VideoDownloadStore.Request, downloaded: Long, total: Long) {
-        val manager = getSystemService(NotificationManagerCompat::class.java) ?: return
+    private fun notifyProgress(videoId: String, downloaded: Long, total: Long) {
+        // Progress is announced a few times a second at most. More often than that and
+        // the system spends its budget re-rendering a bar nobody can read that fast,
+        // which is how a transfer ends up looking like it has stalled.
         val percent = if (total > 0) ((downloaded.toDouble() / total) * 100).toInt() else 0
-        val text = if (total > 0) {
-            "${percent}% • ${formatBytes(downloaded)} / ${formatBytes(total)}"
-        } else {
-            getString(R.string.video_downloading)
+        if (total > 0 && percent == lastNotifiedPercent && downloaded - lastNotifiedBytes < NOTIFY_STEP_BYTES) {
+            return
         }
-        val notification = baseBuilder(request, text)
+        lastNotifiedPercent = percent
+        lastNotifiedBytes = downloaded
+        promoteForeground(videoId, downloaded, total)
+    }
+
+    private fun promoteForeground(videoId: String, downloaded: Long, total: Long) {
+        val manager = getSystemService(NotificationManagerCompat::class.java) ?: return
+        val request = store.request(videoId)
+        val percent = if (total > 0) ((downloaded.toDouble() / total) * 100).toInt() else 0
+        val text = when {
+            total > 0 -> buildString {
+                append("$percent% • ${formatBytes(downloaded)} / ${formatBytes(total)}")
+                // What is still to come, which is the question a percentage cannot
+                // answer on its own.
+                val left = (total - downloaded).coerceAtLeast(0L)
+                if (left > 0L) {
+                    append(" • ")
+                    append(getString(R.string.video_download_left, formatBytes(left)))
+                }
+            }
+
+            else -> getString(R.string.video_downloading)
+        }
+        val builder = (request?.let { baseBuilder(it, text) }
+            ?: NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentTitle(getString(R.string.video_downloads))
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setContentIntent(appIntent(videoId)))
             .setProgress(100, percent, total <= 0)
             .build()
 
         // Promoted rather than merely posted: without it the transfer is the app's own
-        // background work, and the system is entitled to end it whenever it likes.
+        // background work, and the system is entitled to end it whenever it likes. The
+        // notification is never cancelled on the way - cancelling it here is what used
+        // to make a download show nothing at all.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 FOREGROUND_ID,
-                notification,
+                builder,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
             )
         } else {
-            startForeground(FOREGROUND_ID, notification)
+            startForeground(FOREGROUND_ID, builder)
         }
-        manager.cancel(FOREGROUND_ID)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            manager.notify(FOREGROUND_ID, builder)
+        }
+    }
+
+    /**
+     * Keeps the ongoing notification describing what is still moving.
+     *
+     * The foreground notification is a single thing, so when more than one video is on
+     * its way it follows the work rather than the last write to it.
+     */
+    private fun updateForeground() {
+        val remaining = jobs.keys.firstOrNull() ?: return
+        val progress = store.progressFor(remaining)
+        promoteForeground(remaining, progress?.downloadedBytes ?: 0L, progress?.totalBytes ?: 0L)
     }
 
     private fun notifyDone(request: VideoDownloadStore.Request) {
         val manager = getSystemService(NotificationManagerCompat::class.java) ?: return
+        lastNotifiedPercent = -1
         manager.notify(
             notificationId(request.videoId),
             baseBuilder(request, getString(R.string.video_download_complete))
                 .setProgress(0, 0, false)
+                .setOngoing(false)
                 .build(),
         )
     }
 
     private fun notifyFailed(request: VideoDownloadStore.Request, error: Exception) {
         val manager = getSystemService(NotificationManagerCompat::class.java) ?: return
+        lastNotifiedPercent = -1
         manager.notify(
             notificationId(request.videoId),
             baseBuilder(request, error.message ?: getString(R.string.video_download_failed))
                 .setProgress(0, 0, false)
+                .setOngoing(false)
                 .build(),
         )
     }
@@ -332,6 +468,9 @@ class VideoDownloadService : android.app.Service() {
         const val CHANNEL_ID = "video_downloads"
         private const val FOREGROUND_ID = 2
 
+        /** Progress worth re-rendering the notification for: a whole percent, or a chunk. */
+        private const val NOTIFY_STEP_BYTES = 512 * 1024L
+
         const val ACTION_DOWNLOAD = "com.auramusic.app.video.DOWNLOAD"
         const val ACTION_CANCEL = "com.auramusic.app.video.CANCEL"
         const val ACTION_CANCEL_ALL = "com.auramusic.app.video.CANCEL_ALL"
@@ -342,14 +481,23 @@ class VideoDownloadService : android.app.Service() {
             val intent = Intent(context, VideoDownloadService::class.java)
                 .setAction(ACTION_DOWNLOAD)
                 .putExtra(EXTRA_VIDEO_ID, videoId)
-            context.startService(intent)
+            // The foreground flavour, because this service goes to the foreground the
+            // moment it starts. Started as an ordinary background service it is refused
+            // from the background - and where it does start, it is killed for reaching
+            // the foreground without having been asked to.
+            ContextCompat.startForegroundService(context, intent)
         }
 
         fun cancel(context: Context, videoId: String) {
             val intent = Intent(context, VideoDownloadService::class.java)
                 .setAction(ACTION_CANCEL)
                 .putExtra(EXTRA_VIDEO_ID, videoId)
-            context.startService(intent)
+            // Deliberately not the foreground flavour: a cancel has nothing to show,
+            // and a service started that way has to promote a notification it would
+            // only have to take straight back down. A cancel arrives while the listener
+            // is in the app, or as an action on the notification of a service that is
+            // already running.
+            runCatching { context.startService(intent) }
         }
     }
 }

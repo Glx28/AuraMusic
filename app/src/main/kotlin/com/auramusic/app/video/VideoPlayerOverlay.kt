@@ -1681,6 +1681,10 @@ private fun VideoDetailPane(
                         UpNextRow(
                             item = item,
                             isPlaying = item.videoId == uiState.session?.videoId,
+                            // Already watched: still offered - clicking it is a
+                            // deliberate choice - but no longer dressed up as something
+                            // still to come.
+                            hasPlayed = VideoPlaybackManager.hasPlayed(item.videoId),
                             onClick = {
                                 VideoPlaybackManager.playWithDetails(
                                     context = context,
@@ -2260,33 +2264,23 @@ private fun DownloadActionButton() {
             } else {
                 0f
             }
-            Surface(
-                shape = RoundedCornerShape(22.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHighest,
-                modifier = Modifier.height(42.dp),
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.padding(horizontal = 14.dp),
-                ) {
-                    Box(
-                        modifier = Modifier.size(18.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        androidx.compose.material3.CircularProgressIndicator(
-                            progress = { fraction },
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp,
-                        )
-                    }
-                    Text(
-                        text = "${(fraction * 100).toInt()}%",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+            // Still an ActionButton rather than a dead chip: a transfer can be stopped
+            // from here, and a failed one started again, so the control is the same one
+            // whichever state the download is in.
+            ActionButton(
+                icon = R.drawable.download,
+                label = when {
+                    progress.totalBytes > 0 ->
+                        "${(fraction * 100).toInt()}% • " +
+                            "${formatBytes(progress.downloadedBytes)} / ${formatBytes(progress.totalBytes)}"
+
+                    else -> "${stringResource(R.string.video_downloading)} • " +
+                        formatBytes(progress.downloadedBytes)
+                },
+                progress = fraction.takeIf { progress.totalBytes > 0 },
+                selected = false,
+                onClick = { VideoDownloadStore.cancel(context, videoId ?: return@ActionButton) },
+            )
         }
 
         else -> {
@@ -2311,8 +2305,15 @@ private fun DownloadActionButton() {
                 selected = entry != null,
                 // Asks what to fetch rather than taking a quality the user never chose -
                 // the same choice YouTube makes, and the one that decides how much of
-                // their storage this video takes.
-                onClick = { showDownloadDialog = true },
+                // their storage this video takes. A failed download is retried at the
+                // quality it was asked for, so the label above is telling the truth.
+                onClick = {
+                    if (progress?.failed == true && videoId != null) {
+                        VideoDownloadStore.retry(context, videoId)
+                    } else {
+                        showDownloadDialog = true
+                    }
+                },
             )
         }
     }
@@ -2982,6 +2983,7 @@ private fun UpNextRow(
     isPlaying: Boolean,
     onClick: () -> Unit,
     onRemove: () -> Unit,
+    hasPlayed: Boolean = false,
 ) {
     Row(
         modifier = Modifier
@@ -3048,6 +3050,22 @@ private fun UpNextRow(
                         contentDescription = null,
                         modifier = Modifier.size(14.dp),
                         tint = Color.White
+                    )
+                }
+            } else if (hasPlayed) {
+                // Watched already: the picture is dimmed and marked, so a video that
+                // has been round once does not read as something still to come.
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.45f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.check),
+                        contentDescription = stringResource(R.string.video_player_watched),
+                        modifier = Modifier.size(18.dp),
+                        tint = Color.White,
                     )
                 }
             }

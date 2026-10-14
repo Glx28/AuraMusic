@@ -35,8 +35,11 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
  import androidx.compose.ui.text.style.TextOverflow
  import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
+import androidx.compose.material.icons.filled.MenuOpen
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
@@ -59,6 +62,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -114,6 +118,19 @@ import kotlinx.coroutines.launch
  import com.auramusic.app.models.toMediaMetadata
  import com.auramusic.app.ui.component.Lyrics
 
+ // Where each fullscreen transport button sits in the row the remote walks. The slots
+ // are fixed rather than positional so a button that is not drawn - the lyrics toggle
+ // while a video owns the picture - does not shift the ones around it.
+ private const val FULLSCREEN_PREVIOUS_SLOT = 0
+ private const val FULLSCREEN_REWIND_SLOT = 1
+ private const val FULLSCREEN_PLAY_SLOT = 2
+ private const val FULLSCREEN_FORWARD_SLOT = 3
+ private const val FULLSCREEN_NEXT_SLOT = 4
+ private const val FULLSCREEN_LYRICS_SLOT = 5
+ private const val FULLSCREEN_QUEUE_SLOT = 6
+ private const val FULLSCREEN_EXIT_SLOT = 7
+ private const val FULLSCREEN_TRANSPORT_SLOTS = 8
+
  @Composable
  private fun TvPlayerControlButton(
      onClick: () -> Unit,
@@ -123,15 +140,30 @@ import kotlinx.coroutines.launch
      size: androidx.compose.ui.unit.Dp = 72.dp,
      tint: Color = Color.White,
      focusRequester: FocusRequester? = null,
+     modifier: Modifier = Modifier,
+     onFocused: () -> Unit = {},
  ) {
      val isFocusedState = remember { mutableStateOf(false) }
 
      IconButton(
          onClick = onClick,
-         modifier = Modifier
+         modifier = modifier
              .size(size)
              .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
-             .onFocusChanged { isFocusedState.value = it.isFocused }
+             .onFocusChanged {
+                 isFocusedState.value = it.isFocused
+                 // A button nobody can see is a button nobody can aim at, so landing
+                 // focus on one brings the whole overlay back.
+                 if (it.isFocused) onFocused()
+             }
+             .background(
+                 color = if (isFocusedState.value) {
+                     MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+                 } else {
+                     Color.Transparent
+                 },
+                 shape = CircleShape,
+             )
              .border(
                  width = if (isFocusedState.value) 3.dp else 0.dp,
                  color = if (isFocusedState.value) MaterialTheme.colorScheme.primary else Color.Transparent,
@@ -162,17 +194,23 @@ import kotlinx.coroutines.launch
       isCurrentSong: Boolean,
       onClick: () -> Unit,
       modifier: Modifier = Modifier,
+      focusRequester: FocusRequester? = null,
+      onFocused: () -> Unit = {},
   ) {
       val isFocusedState = remember { mutableStateOf(false) }
+      // Keeps the row the remote is actually on inside the panel, so pressing down
+      // past the bottom of the list scrolls instead of going nowhere.
+      val bringIntoViewRequester = remember { BringIntoViewRequester() }
+      val bringIntoViewScope = rememberCoroutineScope()
       val borderColor = if (isFocusedState.value || isCurrentSong) {
           MaterialTheme.colorScheme.primary
       } else {
           Color.Transparent
       }
-      val backgroundColor = if (isCurrentSong) {
-          MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-      } else {
-          MaterialTheme.colorScheme.surface.copy(alpha = 0.3f)
+      val backgroundColor = when {
+          isFocusedState.value -> MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
+          isCurrentSong -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+          else -> MaterialTheme.colorScheme.surface.copy(alpha = 0.3f)
       }
 
       val mediaItem = window.mediaItem
@@ -185,7 +223,17 @@ import kotlinx.coroutines.launch
               .fillMaxWidth()
               .clip(RoundedCornerShape(8.dp))
               .border(2.dp, borderColor, RoundedCornerShape(8.dp))
-              .onFocusChanged { isFocusedState.value = it.isFocused }
+              .bringIntoViewRequester(bringIntoViewRequester)
+              .onFocusChanged {
+                  isFocusedState.value = it.isFocused
+                  if (it.isFocused) {
+                      bringIntoViewScope.launch {
+                          runCatching { bringIntoViewRequester.bringIntoView() }
+                      }
+                      onFocused()
+                  }
+              }
+              .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
               .focusable()
               .clickable(onClick = onClick)
               .background(backgroundColor)
@@ -337,7 +385,21 @@ fun TvPlayerScreen(
     isFullScreen: Boolean,
     onFullScreenChange: (Boolean) -> Unit,
 ) {
-    BackHandler { if (isFullScreen) onFullScreenChange(false) else onBackClick() }
+    // The queue opened over the media is the first thing Back closes: leaving it
+    // open and dropping straight out of fullscreen throws away the way out.
+    var fullscreenQueueOpen by remember { mutableStateOf(false) }
+    BackHandler {
+        when {
+            fullscreenQueueOpen -> fullscreenQueueOpen = false
+            isFullScreen -> onFullScreenChange(false)
+            else -> onBackClick()
+        }
+    }
+    // Leaving fullscreen takes the panel with it, so it cannot reappear over the
+    // split layout with no way to close it.
+    LaunchedEffect(isFullScreen) {
+        if (!isFullScreen) fullscreenQueueOpen = false
+    }
     var duration by remember { mutableStateOf(0L) }
     var currentPosition by remember { mutableStateOf(0L) }
     var sleepTimerMinutes by remember { mutableStateOf<Int?>(null) }
@@ -367,12 +429,30 @@ fun TvPlayerScreen(
         targetValue = if (controlsVisible) 1f else 0f,
         label = "fullscreenControls",
     )
-    val fullscreenPlayFocus = remember { FocusRequester() }
-    LaunchedEffect(isFullScreen) {
-        if (isFullScreen) {
-            delay(120)
-            runCatching { fullscreenPlayFocus.requestFocus() }
-        }
+    // Fullscreen transport controls are driven from the remote rather than a pointer,
+    // so left/right walks the row itself instead of hoping the focus search picks the
+    // right neighbour: the row is the only thing on screen holding focus, and the
+    // search would otherwise have nowhere to go once it reached either end.
+    val transportFocus = remember {
+        List(FULLSCREEN_TRANSPORT_SLOTS) { FocusRequester() }
+    }
+    // The queue panel's own close button, so the remote can leave the list without
+    // having to walk all the way back to the row underneath it.
+    val queueCloseFocus = remember { FocusRequester() }
+    // One requester per queue row, kept across recompositions so the panel can put the
+    // remote back on the row that was playing when it is opened.
+    val queueItemFocusers = remember { mutableStateMapOf<String, FocusRequester>() }
+    fun queueFocuserFor(mediaId: String): FocusRequester =
+        queueItemFocusers.getOrPut(mediaId) { FocusRequester() }
+    // Which button the remote is on. Kept as state rather than read off focus so the
+    // row can move focus without racing the focus system's own bookkeeping.
+    var focusedTransport by remember { mutableStateOf(FULLSCREEN_PLAY_SLOT) }
+    // Waking the overlay when a button takes focus: the remote has just proved the
+    // listener is still watching, and controls that stay faded out are controls that
+    // cannot be aimed at.
+    fun wakeControls() {
+        controlsVisible = true
+        wakeTick++
     }
 
     // Resolve player connection: prefer passed-in parameter, fall back to composition local.
@@ -408,6 +488,60 @@ fun TvPlayerScreen(
     // Focus requesters for TV navigation
     val playButtonFocus = remember { FocusRequester() }
     val queueItemFocus = remember { FocusRequester() }
+
+    // The slots the remote walks, in the order they sit on screen. The lyrics toggle
+    // has nowhere to go while a video owns the picture, so the row closes up around
+    // it instead of stepping onto a button that was never drawn.
+    val transportSlots = remember(videoModeEnabled) {
+        buildList {
+            add(FULLSCREEN_PREVIOUS_SLOT)
+            add(FULLSCREEN_REWIND_SLOT)
+            add(FULLSCREEN_PLAY_SLOT)
+            add(FULLSCREEN_FORWARD_SLOT)
+            add(FULLSCREEN_NEXT_SLOT)
+            if (!videoModeEnabled) add(FULLSCREEN_LYRICS_SLOT)
+            add(FULLSCREEN_QUEUE_SLOT)
+            add(FULLSCREEN_EXIT_SLOT)
+        }
+    }
+
+    /** Moves the remote one button left or right along the drawn row. */
+    fun moveTransportFocus(delta: Int) {
+        val position = transportSlots.indexOf(focusedTransport)
+            .takeIf { it >= 0 }
+            ?: transportSlots.indexOf(FULLSCREEN_PLAY_SLOT)
+        val target = transportSlots[(position + delta).coerceIn(0, transportSlots.lastIndex)]
+        focusedTransport = target
+        wakeControls()
+        runCatching { transportFocus[target].requestFocus() }
+    }
+
+    fun focusTransportSlot(slot: Int) {
+        focusedTransport = slot
+        wakeControls()
+        runCatching { transportFocus[slot].requestFocus() }
+    }
+
+    LaunchedEffect(isFullScreen) {
+        if (isFullScreen) {
+            delay(120)
+            // Play/pause is where the remote starts: it is the one control every
+            // viewer reaches for first.
+            focusTransportSlot(FULLSCREEN_PLAY_SLOT)
+        }
+    }
+
+    // Opening the queue hands the remote to it: the row that is playing takes focus
+    // so up and down walk the list from a known place, rather than starting the
+    // listener back at the top of a queue they cannot see.
+    LaunchedEffect(fullscreenQueueOpen, currentWindowIndex) {
+        if (!fullscreenQueueOpen) return@LaunchedEffect
+        delay(150)
+        val playing = queueWindows.getOrNull(currentWindowIndex)?.mediaItem?.mediaId
+        val requester = playing?.let { queueItemFocusers[it] }
+            ?: queueWindows.firstOrNull()?.mediaItem?.mediaId?.let { queueItemFocusers[it] }
+        if (requester != null) runCatching { requester.requestFocus() }
+    }
 
     LaunchedEffect(Unit) {
         // Request focus on play button initially
@@ -567,6 +701,7 @@ fun TvPlayerScreen(
             // Main content: Two-column layout. Some TVs expose less usable
             // height because of overscan/scaling, so compact the left player
             // column to keep playback controls visible on every TV.
+            Box(modifier = Modifier.fillMaxSize()) {
             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                 val compactHeight = maxHeight < 720.dp
                 val veryCompact = maxHeight < 540.dp
@@ -931,13 +1066,6 @@ fun TvPlayerScreen(
                             size = sideControlSize,
                         )
 
-                        TvPlayerControlButton(
-                            onClick = { onFullScreenChange(true) },
-                            painter = painterResource(R.drawable.fullscreen),
-                            contentDescription = "Enter fullscreen",
-                            size = sideControlSize,
-                        )
-
                         val isLiked = currentSong?.song?.liked == true
                         TvPlayerControlButton(
                             onClick = { pc?.toggleLike() },
@@ -1009,7 +1137,25 @@ fun TvPlayerScreen(
                 }
             }
 
+            // The way out to fullscreen is a fixed button rather than one more row of
+            // controls, because that row is exactly what a full-height video or a
+            // column of lyrics pushes off the bottom of a short screen: it was
+            // reachable with artwork, and unreachable exactly when it was wanted.
+            // Pinned to the corner under the app bar, and on the player side of the
+            // split rather than over the queue, so it works the same for video, for
+            // lyrics and for artwork without covering what is queued.
+            TvPlayerControlButton(
+                onClick = { onFullScreenChange(true) },
+                painter = painterResource(R.drawable.fullscreen),
+                contentDescription = "Enter fullscreen",
+                size = if (compactHeight) 56.dp else 68.dp,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(top = if (compactHeight) 84.dp else 104.dp, start = 24.dp),
+            )
+
             // Back button removed from here — now in the top bar
+            }
             }
             }
 
@@ -1024,10 +1170,30 @@ fun TvPlayerScreen(
                         .zIndex(3f)
                         .background(Color.Black)
                         .onPreviewKeyEvent { event ->
-                            if (event.type == KeyEventType.KeyDown) {
-                                wakeTick++
+                            if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                            wakeTick++
+                            // Left/right walk the transport row by hand. The row is the
+                            // only thing on the screen that holds focus, so leaving it to
+                            // the focus search gives the remote nowhere to go once it
+                            // reaches either end.
+                            when (event.key) {
+                                Key.DirectionLeft, Key.DirectionRight -> {
+                                    // The open queue is a panel of its own: left and
+                                    // right stay inside it rather than walking back to
+                                    // a row that is behind it. Centre is left alone so
+                                    // the row under the remote is the one that is
+                                    // pressed when the listener presses select.
+                                    if (fullscreenQueueOpen) {
+                                        true
+                                    } else {
+                                        moveTransportFocus(
+                                            if (event.key == Key.DirectionLeft) -1 else 1,
+                                        )
+                                        true
+                                    }
+                                }
+                                else -> false
                             }
-                            false
                         },
                 ) {
                     when {
@@ -1181,6 +1347,11 @@ fun TvPlayerScreen(
                                 onClick = { pc?.seekToPrevious() },
                                 icon = Icons.Filled.SkipPrevious,
                                 contentDescription = "Previous song",
+                                focusRequester = transportFocus[FULLSCREEN_PREVIOUS_SLOT],
+                                onFocused = {
+                                    focusedTransport = FULLSCREEN_PREVIOUS_SLOT
+                                    wakeControls()
+                                },
                             )
                             TvPlayerControlButton(
                                 onClick = {
@@ -1189,13 +1360,22 @@ fun TvPlayerScreen(
                                 },
                                 icon = Icons.Filled.FastRewind,
                                 contentDescription = "Rewind 10 seconds",
+                                focusRequester = transportFocus[FULLSCREEN_REWIND_SLOT],
+                                onFocused = {
+                                    focusedTransport = FULLSCREEN_REWIND_SLOT
+                                    wakeControls()
+                                },
                             )
                             TvPlayerControlButton(
                                 onClick = { pc?.togglePlayPause() },
                                 icon = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                                 contentDescription = if (isPlaying) "Pause" else "Play",
                                 size = 88.dp,
-                                focusRequester = fullscreenPlayFocus,
+                                focusRequester = transportFocus[FULLSCREEN_PLAY_SLOT],
+                                onFocused = {
+                                    focusedTransport = FULLSCREEN_PLAY_SLOT
+                                    wakeControls()
+                                },
                             )
                             TvPlayerControlButton(
                                 onClick = {
@@ -1205,11 +1385,21 @@ fun TvPlayerScreen(
                                 },
                                 icon = Icons.Filled.FastForward,
                                 contentDescription = "Fast forward 10 seconds",
+                                focusRequester = transportFocus[FULLSCREEN_FORWARD_SLOT],
+                                onFocused = {
+                                    focusedTransport = FULLSCREEN_FORWARD_SLOT
+                                    wakeControls()
+                                },
                             )
                             TvPlayerControlButton(
                                 onClick = { pc?.seekToNext() },
                                 icon = Icons.Filled.SkipNext,
                                 contentDescription = "Next song",
+                                focusRequester = transportFocus[FULLSCREEN_NEXT_SLOT],
+                                onFocused = {
+                                    focusedTransport = FULLSCREEN_NEXT_SLOT
+                                    wakeControls()
+                                },
                             )
                             if (!videoModeEnabled) {
                                 TvPlayerControlButton(
@@ -1217,14 +1407,150 @@ fun TvPlayerScreen(
                                     icon = Icons.Filled.Lyrics,
                                     contentDescription = if (showLyrics) "Show album artwork" else "Show lyrics",
                                     tint = if (showLyrics) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.7f),
+                                    focusRequester = transportFocus[FULLSCREEN_LYRICS_SLOT],
+                                    onFocused = {
+                                        focusedTransport = FULLSCREEN_LYRICS_SLOT
+                                        wakeControls()
+                                    },
                                 )
                             }
                             Spacer(modifier = Modifier.width(16.dp))
+                            // Kebab: opens and closes the queue over the media. Everything
+                            // the queue offers stays reachable behind it - closing it puts
+                            // the remote back on this button rather than at the far end of
+                            // the row.
+                            TvPlayerControlButton(
+                                onClick = {
+                                    fullscreenQueueOpen = !fullscreenQueueOpen
+                                    if (!fullscreenQueueOpen) {
+                                        focusTransportSlot(FULLSCREEN_QUEUE_SLOT)
+                                    }
+                                },
+                                icon = if (fullscreenQueueOpen) Icons.Filled.MenuOpen else Icons.Filled.MoreVert,
+                                contentDescription = if (fullscreenQueueOpen) "Close queue" else "Open queue",
+                                tint = if (fullscreenQueueOpen) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    Color.White
+                                },
+                                focusRequester = transportFocus[FULLSCREEN_QUEUE_SLOT],
+                                onFocused = {
+                                    focusedTransport = FULLSCREEN_QUEUE_SLOT
+                                    wakeControls()
+                                },
+                            )
                             TvPlayerControlButton(
                                 onClick = { onFullScreenChange(false) },
                                 painter = painterResource(R.drawable.fullscreen_exit),
                                 contentDescription = "Exit fullscreen",
+                                focusRequester = transportFocus[FULLSCREEN_EXIT_SLOT],
+                                onFocused = {
+                                    focusedTransport = FULLSCREEN_EXIT_SLOT
+                                    wakeControls()
+                                },
                             )
+                        }
+                    }
+
+                    if (fullscreenQueueOpen) {
+                        // The queue, folded out over the media. It takes the whole right
+                        // edge so a title is never clipped by the panel, and every row is
+                        // focusable and selectable from the remote.
+                        Surface(
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .fillMaxHeight()
+                                .width(460.dp)
+                                .zIndex(4f),
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f),
+                            tonalElevation = 6.dp,
+                        ) {
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                                        .padding(start = 20.dp, end = 12.dp, top = 14.dp, bottom = 14.dp),
+                                ) {
+                                    Text(
+                                        text = "Queue",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    Text(
+                                        text = makeTimeString(duration),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    TvPlayerControlButton(
+                                        onClick = {
+                                            fullscreenQueueOpen = false
+                                            focusTransportSlot(FULLSCREEN_QUEUE_SLOT)
+                                        },
+                                        icon = Icons.Filled.Close,
+                                        contentDescription = "Close queue",
+                                        size = 48.dp,
+                                        tint = MaterialTheme.colorScheme.onSurface,
+                                        focusRequester = queueCloseFocus,
+                                        onFocused = { wakeControls() },
+                                    )
+                                }
+
+                                LazyColumn(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentPadding = PaddingValues(vertical = 12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    items(
+                                        count = queueWindows.size,
+                                        key = { index ->
+                                            "${queueWindows.getOrNull(index)?.mediaItem?.mediaId ?: "unknown"}_$index"
+                                        },
+                                    ) { index ->
+                                        val window = queueWindows.getOrNull(index)
+                                        val isCurrentSong = index == currentWindowIndex
+                                        if (window != null) {
+                                            val mediaId = window.mediaItem.mediaId
+                                            TvQueueItem(
+                                                window = window,
+                                                isCurrentSong = isCurrentSong,
+                                                onClick = {
+                                                    fullscreenQueueOpen = false
+                                                    pc?.player?.seekTo(index, C.TIME_UNSET)
+                                                    focusTransportSlot(FULLSCREEN_PLAY_SLOT)
+                                                },
+                                                focusRequester = queueFocuserFor(mediaId),
+                                                onFocused = { wakeControls() },
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 12.dp),
+                                            )
+                                        }
+                                    }
+
+                                    if (queueWindows.isEmpty()) {
+                                        item {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(32.dp),
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                Text(
+                                                    text = "Queue is empty",
+                                                    style = MaterialTheme.typography.bodyLarge,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    textAlign = TextAlign.Center,
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

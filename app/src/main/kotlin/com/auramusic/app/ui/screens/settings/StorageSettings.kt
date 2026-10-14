@@ -27,6 +27,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -57,10 +58,12 @@ import com.auramusic.app.ui.component.Material3SettingsItem
 import com.auramusic.app.ui.utils.backToMain
 import com.auramusic.app.ui.utils.formatFileSize
 import com.auramusic.app.utils.rememberPreference
+import com.auramusic.app.video.VideoDownloadStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalCoilApi::class, ExperimentalMaterial3Api::class, DelicateCoilApi::class)
@@ -89,6 +92,24 @@ fun StorageSettings(
     var clearDownloads by remember { mutableStateOf(false) }
     var clearCacheDialog by remember { mutableStateOf(false) }
     var clearImageCacheDialog by remember { mutableStateOf(false) }
+    var clearVideoDownloadsDialog by remember { mutableStateOf(false) }
+
+    // Videos are kept by a service of their own, in files of their own, so their place
+    // on the device is measured separately and cleared separately. Asking the music
+    // cache to account for them answers a question nobody asked.
+    LaunchedEffect(Unit) { VideoDownloadStore.load(context) }
+    val videoDownloads by VideoDownloadStore.entries(context).collectAsState()
+    val pendingVideoDownloads by VideoDownloadStore.pendingFlow(context).collectAsState()
+    var videoDiskUsage by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(Unit) {
+        // Measured on a timer rather than per state change: progress lands many times a
+        // second while something is downloading, and re-walking the folder on each of
+        // those would cost far more than the answer is worth.
+        while (isActive) {
+            videoDiskUsage = withContext(Dispatchers.IO) { VideoDownloadStore.diskUsage(context) }
+            delay(1500)
+        }
+    }
 
     // State for the confirmation dialog
     var showCacheWarningDialog by remember { mutableStateOf(false) }
@@ -210,6 +231,22 @@ fun StorageSettings(
             }
         )
     }
+    if (clearVideoDownloadsDialog) {
+        ActionPromptDialog(
+            title = stringResource(R.string.clear_video_downloads),
+            onDismiss = { clearVideoDownloadsDialog = false },
+            onConfirm = {
+                coroutineScope.launch(Dispatchers.IO) {
+                    VideoDownloadStore.removeAll(context)
+                }
+                clearVideoDownloadsDialog = false
+            },
+            onCancel = { clearVideoDownloadsDialog = false },
+            content = {
+                Text(text = stringResource(R.string.clear_video_downloads_dialog))
+            },
+        )
+    }
 
     // Confirmation Dialog
     if (showCacheWarningDialog) {
@@ -281,6 +318,46 @@ fun StorageSettings(
                         }
                     )
                 )
+            )
+
+            Material3SettingsGroup(
+                title = stringResource(R.string.videos_section),
+                items = listOf(
+                    Material3SettingsItem(
+                        icon = painterResource(R.drawable.slow_motion_video),
+                        title = { Text(stringResource(R.string.video_downloads_storage)) },
+                        description = {
+                            Text(
+                                text = when {
+                                    // Still arriving: the number on screen is the room
+                                    // the videos take right now, and the count says how
+                                    // many of them are mid-transfer.
+                                    pendingVideoDownloads.isNotEmpty() -> stringResource(
+                                        R.string.video_downloads_storage_pending,
+                                        formatFileSize(videoDiskUsage),
+                                        pendingVideoDownloads.size,
+                                    )
+
+                                    videoDownloads.isNotEmpty() -> stringResource(
+                                        R.string.video_downloads_storage_summary,
+                                        formatFileSize(videoDiskUsage),
+                                        videoDownloads.size,
+                                    )
+
+                                    else -> stringResource(R.string.video_downloads_none)
+                                },
+                            )
+                        },
+                    ),
+                    Material3SettingsItem(
+                        icon = painterResource(R.drawable.clear_all),
+                        title = { Text(stringResource(R.string.clear_video_downloads)) },
+                        // Nothing to clear is not a button that does nothing: there is
+                        // no video on the device to remove.
+                        enabled = videoDownloads.isNotEmpty() || pendingVideoDownloads.isNotEmpty(),
+                        onClick = { clearVideoDownloadsDialog = true },
+                    ),
+                ),
             )
 
             Material3SettingsGroup(

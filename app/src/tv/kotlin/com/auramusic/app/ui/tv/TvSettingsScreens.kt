@@ -185,11 +185,65 @@ import kotlin.math.roundToInt
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
     ) {
-        Box(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // TvApp draws its own bar over this screen. Everything here starts underneath
+            // it instead of on top of it: the sign-in header used to be laid out in the
+            // same strip the app bar occupies, so the two sat on each other and the
+            // sign-in details ran through the bar as soon as the page filled.
+            Spacer(modifier = Modifier.height(95.dp))
+
+            // Sign-in header, below the app bar rather than inside it.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(horizontal = 24.dp, vertical = 12.dp)
+                    .onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) {
+                            onNavigateUp?.invoke()
+                            true
+                        } else if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                            // Move focus to WebView
+                            webView?.requestFocus()
+                            true
+                        } else {
+                            false
+                        }
+                    },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                var backFocused by remember { mutableStateOf(false) }
+                IconButton(
+                    onClick = onBackClick,
+                    modifier = Modifier
+                        .size(56.dp)
+                        .focusRequester(backFocus)
+                        .onFocusChanged { backFocused = it.isFocused }
+                        .border(
+                            width = if (backFocused) 3.dp else 0.dp,
+                            color = if (backFocused) MaterialTheme.colorScheme.primary else Color.Transparent,
+                            shape = CircleShape,
+                        ),
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+                Spacer(Modifier.size(16.dp))
+                Text(
+                    text = "Sign in to YouTube Music",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+
             AndroidView(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(top = 95.dp)
+                    .fillMaxWidth()
+                    .weight(1f)
                     .focusRequester(remember { FocusRequester() })
                     .onPreviewKeyEvent { event ->
                         // Forward D-pad events to WebView for form navigation
@@ -323,54 +377,6 @@ import kotlin.math.roundToInt
                     }
                 }
             )
-
-            // Top bar with back button + title
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f))
-                    .padding(horizontal = 24.dp, vertical = 12.dp)
-                    .onPreviewKeyEvent { event ->
-                        if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) {
-                            onNavigateUp?.invoke()
-                            true
-                        } else if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
-                            // Move focus to WebView
-                            webView?.requestFocus()
-                            true
-                        } else {
-                            false
-                        }
-                    },
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                var backFocused by remember { mutableStateOf(false) }
-                IconButton(
-                    onClick = onBackClick,
-                    modifier = Modifier
-                        .size(56.dp)
-                        .focusRequester(backFocus)
-                        .onFocusChanged { backFocused = it.isFocused }
-                        .border(
-                            width = if (backFocused) 3.dp else 0.dp,
-                            color = if (backFocused) MaterialTheme.colorScheme.primary else Color.Transparent,
-                            shape = CircleShape,
-                        ),
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint = MaterialTheme.colorScheme.onSurface,
-                    )
-                }
-                Spacer(Modifier.size(16.dp))
-                Text(
-                    text = "Sign in to YouTube Music",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-            }
         }
     }
 

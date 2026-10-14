@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,10 +23,12 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Checkbox
@@ -33,6 +36,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -63,7 +67,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -201,8 +207,61 @@ private fun DownloadsKindSelector(
 }
 
 /**
- * A downloaded video, in the same shape as a downloaded song so the two screens read as
- * one screen showing two things.
+ * What the videos side of the downloads screen is holding.
+ *
+ * Count and size, kept separate from the rows: a shelf with no total gives the listener
+ * no way to tell one video from forty, and nothing to weigh a "clear this" against.
+ */
+@Composable
+private fun VideoDownloadsSummary(
+    finished: Int,
+    downloading: Int,
+    sizeBytes: Long,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        Text(
+            text = finished.toString(),
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = if (finished == 1) {
+                    stringResource(R.string.video_downloads_one)
+                } else {
+                    stringResource(R.string.video_downloads_count, finished)
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                text = buildString {
+                    append(formatDownloadedVideoSize(sizeBytes))
+                    if (downloading > 0) {
+                        append(" • ")
+                        append(stringResource(R.string.video_downloads_pending_count, downloading))
+                    }
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * A downloaded video.
+ *
+ * A video is not a song in a square: it is a picture with something happening in it, so
+ * the row shows a 16:9 thumbnail, says plainly what was saved at, and marks the copy as
+ * one that is on the device rather than one that happens to be playing.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -212,67 +271,118 @@ private fun DownloadedVideoRow(
     onRemove: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    ListItem(
-        headlineContent = {
-            Text(
-                text = download.title,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(end = 12.dp),
-            )
-        },
-        supportingContent = {
-            Text(
-                // What it was saved at, not what it is playing at: this is the copy on
-                // the device, and a later change of preference must not rewrite it.
-                text = listOfNotNull(
-                    download.channelName.takeIf { it.isNotBlank() },
-                    download.quality.label,
-                    formatDownloadedVideoSize(download.sizeBytes),
-                ).joinToString(" • "),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        },
-        leadingContent = {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .combinedClickable(onLongClick = onRemove, onClick = onPlay)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .width(112.dp)
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+        ) {
+            download.thumbnailUrl?.let { thumbnail ->
+                AsyncImage(
+                    model = thumbnail,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             Box(
-                contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                    .matchParentSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.35f)),
+                        ),
+                    ),
+            )
+            // Played from the device, so the affordance is the same one the player uses.
+            Surface(
+                shape = CircleShape,
+                color = Color.Black.copy(alpha = 0.55f),
+                modifier = Modifier.size(34.dp),
             ) {
-                download.thumbnailUrl?.let { thumbnail ->
-                    AsyncImage(
-                        model = thumbnail,
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        painter = painterResource(R.drawable.play),
                         contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp),
                     )
                 }
-                Icon(
-                    painter = painterResource(R.drawable.play),
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.size(22.dp),
+            }
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = Color.Black.copy(alpha = 0.7f),
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(4.dp),
+            ) {
+                Text(
+                    text = download.quality.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White,
+                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
                 )
             }
-        },
-        trailingContent = {
-            IconButton(onClick = onRemove) {
-                Icon(
-                    painter = painterResource(R.drawable.delete),
-                    contentDescription = stringResource(R.string.remove_download),
+        }
+
+        Spacer(modifier = Modifier.width(14.dp))
+
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = download.title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            download.channelName.takeIf { it.isNotBlank() }?.let { channel ->
+                Text(
+                    text = channel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
-        },
-        modifier = modifier
-            .clickable(onClick = onPlay)
-            .combinedClickable(
-                onLongClick = onRemove,
-                onClick = onPlay,
-            ),
-    )
+            // What it was saved at, not what it is playing at: this is the copy on the
+            // device, and a later change of preference must not rewrite it.
+            Text(
+                text = listOfNotNull(
+                    // The height that was actually saved, where there was one: a row
+                    // reading "Auto" tells the viewer nothing about what they can play.
+                    download.height.takeIf { it > 0 }?.let { "${it}p" }
+                        ?: download.quality.label.takeIf { !download.quality.isAuto },
+                    download.codec.label.takeIf { !download.codec.isAuto },
+                    formatDownloadedVideoSize(download.sizeBytes),
+                    download.durationMs.takeIf { it > 0 }?.let { formatDownloadedVideoDuration(it) },
+                ).joinToString(" • "),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        IconButton(onClick = onRemove) {
+            Icon(
+                painter = painterResource(R.drawable.delete),
+                contentDescription = stringResource(R.string.remove_download),
+            )
+        }
+    }
 }
 
 /** A video on its way: what it is, how far it has got, and what can be done about it. */
@@ -284,33 +394,20 @@ private fun PendingVideoRow(
     onRemove: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    ListItem(
-        headlineContent = {
-            Text(
-                text = pending.title,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(end = 12.dp),
-            )
-        },
-        supportingContent = {
-            Text(
-                text = if (pending.failed) {
-                    stringResource(R.string.video_download_failed)
-                } else {
-                    pending.fraction?.let { "${(it * 100).toInt()}%" }
-                        ?: stringResource(R.string.video_downloading)
-                },
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        },
-        leadingContent = {
+    val remaining = (pending.totalBytes - pending.downloadedBytes).coerceAtLeast(0L)
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(6.dp))
+                    .width(112.dp)
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(12.dp))
                     .background(MaterialTheme.colorScheme.surfaceContainerHighest),
             ) {
                 pending.thumbnailUrl?.let { thumbnail ->
@@ -321,52 +418,142 @@ private fun PendingVideoRow(
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
-                if (pending.failed) {
-                    Icon(
-                        painter = painterResource(R.drawable.error),
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(22.dp),
-                    )
-                } else {
-                    val fraction = pending.fraction
-                    if (fraction == null) {
-                        // No reported length means no honest fraction: the ring turns
-                        // rather than sitting at a number that means nothing.
-                        CircularProgressIndicator(
-                            color = Color.White,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(22.dp),
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(Color.Black.copy(alpha = 0.4f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (pending.failed) {
+                        Icon(
+                            painter = painterResource(R.drawable.error),
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(24.dp),
                         )
                     } else {
                         CircularProgressIndicator(
-                            progress = { fraction },
+                            progress = { pending.fraction ?: 0f },
                             color = Color.White,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(22.dp),
+                            trackColor = Color.White.copy(alpha = 0.25f),
+                            strokeWidth = 3.dp,
+                            modifier = Modifier.size(26.dp),
                         )
                     }
                 }
             }
-        },
-        trailingContent = {
+
+            Spacer(modifier = Modifier.width(14.dp))
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = pending.title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                pending.channelName.takeIf { it.isNotBlank() }?.let { channel ->
+                    Text(
+                        text = channel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Text(
+                    text = when {
+                        pending.failed -> stringResource(R.string.video_download_failed)
+                        // Megabytes in, megabytes to go: a percentage alone says how far
+                        // along it is, and not how much of the device it is eating on the
+                        // way there.
+                        pending.totalBytes > 0 -> buildString {
+                            append(pending.fraction?.let { "${(it * 100).toInt()}%" }
+                                ?: stringResource(R.string.video_downloading))
+                            append(" • ")
+                            append("${formatDownloadedVideoSize(pending.downloadedBytes)} / ")
+                            append(formatDownloadedVideoSize(pending.totalBytes))
+                            if (remaining > 0) {
+                                append(" • ")
+                                append(
+                                    stringResource(
+                                        R.string.video_download_left,
+                                        formatDownloadedVideoSize(remaining),
+                                    ),
+                                )
+                            }
+                        }
+
+                        // No length yet: what has landed is still worth saying, because a
+                        // row that only reads "Downloading" gives nothing to wait on.
+                        pending.downloadedBytes > 0 ->
+                            "${stringResource(R.string.video_downloading)} • " +
+                                formatDownloadedVideoSize(pending.downloadedBytes)
+
+                        else -> stringResource(R.string.video_downloading)
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (pending.failed) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
             IconButton(onClick = if (pending.failed) onRetry else onRemove) {
                 Icon(
-                    painter = painterResource(R.drawable.close),
+                    painter = painterResource(if (pending.failed) R.drawable.refresh else R.drawable.close),
                     contentDescription = stringResource(
-                        if (pending.failed) R.string.video_download_failed else R.string.remove_download,
+                        if (pending.failed) R.string.video_download_retry else R.string.remove_download,
                     ),
                 )
             }
-        },
-        modifier = modifier,
-    )
+        }
+
+        // The bar itself. Kept under the row rather than inside the thumbnail so the
+        // length of the transfer is readable at a glance while it is happening.
+        LinearProgressIndicator(
+            progress = { pending.fraction ?: 0f },
+            color = if (pending.failed) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.primary
+            },
+            trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+            strokeCap = StrokeCap.Round,
+            gapSize = 0.dp,
+            drawStopIndicator = {},
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(6.dp)
+                .clip(RoundedCornerShape(3.dp)),
+        )
+    }
 }
 
 private fun formatDownloadedVideoSize(bytes: Long): String {
     if (bytes <= 0) return "0 MB"
     val mb = bytes / (1024.0 * 1024.0)
-    return if (mb >= 1024) String.format("%.1f GB", mb / 1024.0) else String.format("%.0f MB", mb)
+    return if (mb >= 1024) String.format("%.1f GB", mb / 1024.0) else String.format("%.1f MB", mb)
+}
+
+private fun formatDownloadedVideoDuration(durationMs: Long): String {
+    val totalSeconds = (durationMs / 1000).coerceAtLeast(0)
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+    return if (hours > 0) {
+        String.format("%d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format("%d:%02d", minutes, seconds)
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
@@ -559,17 +746,9 @@ fun AutoPlaylistScreen(
         VideoDownloadStore.load(context)
     }
     val videoDownloads by VideoDownloadStore.entries(context).collectAsState()
-    val downloadTick by produceState(0L) {
-        while (true) {
-            delay(1_000)
-            value++
-        }
-    }
-    val pendingVideoDownloads = remember(downloadTick, videoDownloads) {
-        VideoDownloadStore.pending(context).filter { pending ->
-            videoDownloads.none { it.videoId == pending.videoId }
-        }
-    }
+    // Watched rather than polled: the service reports every chunk, and a row that only
+    // refreshed once a second showed a download as stalled between ticks.
+    val pendingVideoDownloads by VideoDownloadStore.pendingFlow(context).collectAsState()
 
     val isRefreshing by viewModel.isRefreshing.collectAsState()
     val pullRefreshState = rememberPullToRefreshState()
@@ -613,6 +792,17 @@ fun AutoPlaylistScreen(
                         )
                     }
                 } else {
+                    // A line saying how much this is, the way the music side has a
+                    // header of its own: a shelf of videos with no total reads as a list
+                    // of links rather than as what is on the device.
+                    item(key = "videos_summary") {
+                        VideoDownloadsSummary(
+                            finished = videoDownloads.size,
+                            downloading = pendingVideoDownloads.size,
+                            sizeBytes = videoDownloads.sumOf { it.sizeBytes },
+                            modifier = Modifier.animateItem(),
+                        )
+                    }
                     items(pendingVideoDownloads, key = { "pending_${it.videoId}" }) { pending ->
                         PendingVideoRow(
                             pending = pending,

@@ -400,7 +400,75 @@ object VideoPlaybackManager {
      * fullscreen. Weak so a configuration change can collect the old Activity.
      */
     private var activityRef: java.lang.ref.WeakReference<android.app.Activity>? = null
-    private val playedVideoIds = mutableSetOf<String>()
+
+    /**
+     * Videos this session has already played, in the order they were played.
+     *
+     * A recommendation list is generated from what YouTube thinks is related to the
+     * video on screen, which happily includes what came before it: without this the
+     * same three videos came round again every time the queue ran out. It survives
+     * closing the overlay on purpose - the queue is the listener's, not the window's -
+     * and is capped so a long session cannot grow without end.
+     */
+    private val playedVideoIds = LinkedHashSet<String>()
+
+    /** Remembers [videoId] as played, oldest first, and forgets the ones furthest back. */
+    private fun markPlayed(videoId: String) {
+        if (videoId.isBlank()) return
+        playedVideoIds.remove(videoId)
+        playedVideoIds.add(videoId)
+        while (playedVideoIds.size > MAX_REMEMBERED_PLAYED) {
+            val oldest = playedVideoIds.firstOrNull() ?: break
+            playedVideoIds.remove(oldest)
+        }
+    }
+
+    /**
+     * The queue as it should read right now: what is playing stays on top, and nothing
+     * already played or already in the list is offered a second time.
+     *
+     * The recommendations that arrive for a new video are a fresh page, so without this
+     * the list the listener is looking at jumps about under them - the video playing
+     * disappears off the top and videos that have been watched come back into it.
+     */
+    private fun rebuildQueue(
+        candidates: List<RecommendationItem>,
+        keepCurrentOnTop: Boolean = true,
+    ): List<RecommendationItem> {
+        val currentId = _uiState.value.session?.videoId
+        val seen = mutableSetOf<String>()
+        val kept = ArrayList<RecommendationItem>(candidates.size + 1)
+        fun offer(item: RecommendationItem) {
+            val id = item.videoId
+            if (id.isBlank()) return
+            // The video on screen belongs at the top whatever the new page says about
+            // it; a repeat of it further down is the same video twice.
+            if (id == currentId) {
+                if (keepCurrentOnTop && kept.none { it.videoId == id }) {
+                    kept.add(item)
+                }
+                return
+            }
+            if (id in playedVideoIds) return
+            if (!seen.add(id)) return
+            kept.add(item)
+        }
+        candidates.forEach(::offer)
+        if (keepCurrentOnTop && currentId != null && kept.none { it.videoId == currentId }) {
+            val session = _uiState.value.session
+            kept.add(
+                0,
+                RecommendationItem(
+                    videoId = currentId,
+                    title = session?.title.orEmpty(),
+                    channelName = session?.channelName.orEmpty(),
+                    thumbnail = session?.videoThumbnail,
+                    durationText = null,
+                ),
+            )
+        }
+        return kept
+    }
 
     /**
      * Bumped every time a different video is requested. Stream extraction is async,
@@ -581,7 +649,7 @@ object VideoPlaybackManager {
             // run the full load again so the video source is put back on the player.
         }
 
-        playedVideoIds.add(videoId)
+        markPlayed(videoId)
         // A new video invalidates the previous one's cached watch page.
         watchMetadataCache = null
         watchMetadataCacheVideoId = null
@@ -829,26 +897,44 @@ object VideoPlaybackManager {
     fun playNext(item: RecommendationItem) {
         val state = _uiState.value
         if (item.videoId == state.session?.videoId) return
-        val withoutIt = state.queue.filterNot { it.videoId == item.videoId }
-        val currentId = state.session?.videoId ?: return
-        // The current video stays first so the queue still describes "what plays next".
-        val current = RecommendationItem(
-            videoId = currentId,
-            title = state.session?.title.orEmpty(),
-            channelName = state.session?.channelName.orEmpty(),
-            thumbnail = state.session?.videoThumbnail,
-            durationText = null,
-        )
-        _uiState.update { it.copy(queue = listOf(current) + item + withoutIt) }
+        // rebuildQueue keeps the video on screen on top and drops anything already
+        // watched, so the requested video lands immediately after it - which is what
+        // "play next" asks for - and the rest of the list still describes what follows.
+        _uiState.update {
+            it.copy(queue = rebuildQueue(listOf(item) + it.queue))
+        }
         queuedAheadVideoId = null
         queueUpcomingVideo()
     }
+
+    /**
+     * Whether this video has already been played this session.
+     *
+     * Shown on the Up next list so a video that has been watched reads as watched,
+     * rather than looking like something still to come.
+     */
+    fun hasPlayed(videoId: String): Boolean = videoId in playedVideoIds
 
     private fun queueUpcomingVideo() {
         val state = _uiState.value
         if (!state.autoplayEnabled) return
         val currentId = state.session?.videoId ?: return
-        val nextItem = state.queue.firstOrNull { it.videoId != currentId && it.videoId !in playedVideoIds }
+        // Everything in the queue has been played - the page this video was recommended
+        // from is finite, and the ones in front of it have all been watched. Rather than
+        // let the session stop dead, the recommendations are topped up from what has
+        // been seen: that is the same list the Up next panel shows, so the queue keeps
+        // playing what the listener is already looking at.
+        if (state.queue.none { it.videoId != currentId && it.videoId !in playedVideoIds }) {
+            val topUp = state.recommendations
+                .filter { it.videoId != currentId && it.videoId !in playedVideoIds }
+            if (topUp.isNotEmpty()) {
+                _uiState.update {
+                    it.copy(queue = rebuildQueue(it.queue + topUp))
+                }
+            }
+        }
+        val refreshed = _uiState.value
+        val nextItem = refreshed.queue.firstOrNull { it.videoId != currentId && it.videoId !in playedVideoIds }
             ?: return
         if (queuedAheadVideoId == nextItem.videoId) return
         val ctx = currentContext ?: return
@@ -881,7 +967,7 @@ object VideoPlaybackManager {
      */
     private fun advanceSessionTo(videoId: String) {
         val item = _uiState.value.queue.firstOrNull { it.videoId == videoId } ?: return
-        playedVideoIds.add(videoId)
+        markPlayed(videoId)
         queuedAheadVideoId = null
         // A new video invalidates the previous one's cached watch page.
         watchMetadataCache = null
@@ -947,11 +1033,10 @@ object VideoPlaybackManager {
             val items = related
                 .filter { it.videoId.isNotBlank() && it.videoId != videoId }
                 .map { it.toRecommendationItem() }
-            val queue = items.filter { it.videoId !in playedVideoIds }
             _uiState.update {
                 it.copy(
                     recommendations = items,
-                    queue = queue,
+                    queue = rebuildQueue(items),
                     recommendationsContinuation = metadata?.relatedContinuation(),
                     isLoadingRecommendations = false,
                 )
@@ -979,9 +1064,12 @@ object VideoPlaybackManager {
         }
         if (nextItems.isNotEmpty()) {
             if (_uiState.value.session?.videoId != videoId) return
-            val queue = nextItems.filter { it.videoId !in playedVideoIds }
             _uiState.update {
-                it.copy(recommendations = nextItems, queue = queue, isLoadingRecommendations = false)
+                it.copy(
+                    recommendations = nextItems,
+                    queue = rebuildQueue(nextItems),
+                    isLoadingRecommendations = false,
+                )
             }
             queueUpcomingVideo()
             return
@@ -1006,9 +1094,12 @@ object VideoPlaybackManager {
                 )
             }
             if (_uiState.value.session?.videoId != videoId) return
-            val queue = relatedItems.filter { it.videoId !in playedVideoIds }
             _uiState.update {
-                it.copy(recommendations = relatedItems, queue = queue, isLoadingRecommendations = false)
+                it.copy(
+                    recommendations = relatedItems,
+                    queue = rebuildQueue(relatedItems),
+                    isLoadingRecommendations = false,
+                )
             }
             queueUpcomingVideo()
         } else {
@@ -1034,9 +1125,14 @@ object VideoPlaybackManager {
                 .map { it.toRecommendationItem() }
             _uiState.update { current ->
                 val existing = current.recommendations.map { it.videoId }.toSet()
+                val fresh = items.filter { it.videoId !in existing }
                 current.copy(
-                    recommendations = current.recommendations + items.filter { it.videoId !in existing },
-                    queue = current.queue + items.filter { it.videoId !in existing && it.videoId !in playedVideoIds },
+                    recommendations = current.recommendations + fresh,
+                    // A page arriving later must not disturb what is already queued, so
+                    // it is only added where it is not already in the list.
+                    queue = rebuildQueue(
+                        candidates = current.queue.filterNot { it.videoId == current.session?.videoId } + fresh,
+                    ),
                     recommendationsContinuation = nextContinuation,
                     isLoadingMoreRecommendations = false,
                 )
@@ -1823,7 +1919,12 @@ object VideoPlaybackManager {
 
     /** Clears the pending playback queue (Up next stays visible). */
     fun clearQueue() {
-        _uiState.update { it.copy(queue = emptyList()) }
+        val currentId = _uiState.value.session?.videoId
+        val current = _uiState.value.queue.firstOrNull { it.videoId == currentId }
+        // What is playing stays on: a queue emptied from under the video on screen reads
+        // as though playback has stopped, and the next thing to play would be nothing.
+        _uiState.update { it.copy(queue = listOfNotNull(current)) }
+        queuedAheadVideoId = null
     }
 
     fun shareVideo(context: Context) {
@@ -1852,27 +1953,43 @@ object VideoPlaybackManager {
      * the next item. The item is prepended to the Up Next list and the queue.
      */
     fun queueNext(video: YouTubeVideoItem) {
+        val item = video.toRecommendationItem()
+        val state = _uiState.value
+        // Already playing, already queued, or already watched: putting it back does
+        // nothing except make the same video turn up twice in a row.
+        if (item.videoId == state.session?.videoId) return
+        if (state.queue.any { it.videoId == item.videoId }) return
         _uiState.update { state ->
-            val existing = state.recommendations.any { it.videoId == video.videoId }
-            val currentId = state.session?.videoId
-            val item = video.toRecommendationItem()
+            val existing = state.recommendations.any { it.videoId == item.videoId }
             state.copy(
                 recommendations = if (existing) state.recommendations else listOf(item) + state.recommendations,
-                queue = listOf(item) + state.queue.filterNot { it.videoId == currentId },
+                // Straight after the video on screen, which rebuildQueue keeps on top.
+                queue = rebuildQueue(listOf(item) + state.queue),
             )
+        }
+        if (_uiState.value.queue.any { it.videoId == item.videoId }) {
+            queuedAheadVideoId = null
+            queueUpcomingVideo()
         }
     }
 
     /** Appends a feed/list video to the end of the playback queue. */
     fun addToQueue(video: YouTubeVideoItem) {
+        val item = video.toRecommendationItem()
         _uiState.update { state ->
-            if (state.queue.any { it.videoId == video.videoId }) return@update state
+            if (state.session?.videoId == item.videoId) return@update state
+            if (state.queue.any { it.videoId == item.videoId }) return@update state
             state.copy(
-                recommendations = if (state.recommendations.any { it.videoId == video.videoId }) state.recommendations
-                else state.recommendations + video.toRecommendationItem(),
-                queue = state.queue + video.toRecommendationItem(),
+                recommendations = if (state.recommendations.any { it.videoId == item.videoId }) {
+                    state.recommendations
+                } else {
+                    state.recommendations + item
+                },
+                queue = rebuildQueue(state.queue + item),
             )
         }
+        queuedAheadVideoId = null
+        queueUpcomingVideo()
     }
 
     fun shareVideo(context: Context, videoId: String, title: String) {
@@ -2027,7 +2144,9 @@ object VideoPlaybackManager {
         // is off-screen). The DisposableEffect in VideoPlayerOverlay handles it when the
         // composable is alive; this is the safety net for every other code path.
         activityRef?.get()?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        playedVideoIds.clear()
+        // playedVideoIds deliberately survives this: the queue belongs to the listener
+        // rather than to the window, and forgetting what has been watched when the
+        // overlay is closed is what let the same videos come round again.
         queuedAheadVideoId = null
         // Drop our handles so we aren't pinning a Context/Activity any longer.
         currentContext = null
@@ -2041,7 +2160,6 @@ object VideoPlaybackManager {
         sharedConnectionRef?.get()?.service?.endGuestVideo(restoreQueue = false)
         tickerJob?.cancel()
         tickerJob = null
-        playedVideoIds.clear()
     }
 
     @androidx.annotation.OptIn(UnstableApi::class)
@@ -2355,6 +2473,14 @@ object VideoPlaybackManager {
 }
 
 private const val MAX_VIDEO_HISTORY_ENTRIES = 100
+
+/**
+ * How many played videos the queue remembers.
+ *
+ * Enough that a session cannot come round to the same recommendations twice over,
+ * bounded so a long evening of videos does not grow a set without end.
+ */
+private const val MAX_REMEMBERED_PLAYED = 300
 
 /**
  * Channel avatars are served from these hosts. Used to tell an artwork URL that is
