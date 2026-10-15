@@ -494,6 +494,12 @@ private fun TvVideoView(
         modifier = modifier.background(Color.Black),
         contentAlignment = Alignment.Center,
     ) {
+        // Which view currently holds the player's surface. A player has one surface
+        // at a time, and it does not care which view asked for it: the two instances
+        // here live in mutually exclusive branches, so moving between them disposes
+        // one while creating the other in the same frame, and whichever loses the
+        // race takes the surface away from the winner on its way out.
+        val surfaceOwner = remember { arrayOfNulls<PlayerView>(1) }
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
@@ -502,12 +508,14 @@ private fun TvVideoView(
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                     setBackgroundColor(android.graphics.Color.BLACK)
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
+                    surfaceOwner[0] = this
                 }
             },
             modifier = Modifier.fillMaxSize(),
             update = { playerView ->
                 // Always sync player reference and resume surface. Keep player
                 // attached across navigations to avoid black screen after 2+ re-entries.
+                surfaceOwner[0] = playerView
                 if (playerView.player !== activePlayer) {
                     playerView.player = activePlayer
                 }
@@ -516,7 +524,14 @@ private fun TvVideoView(
                 playerView.requestLayout()
             },
             onRelease = { playerView ->
-                playerView.onPause()
+                // Only let go if this is still the view holding the picture. A view
+                // replaced by another one has already handed the surface over, and
+                // releasing it here would blank the picture that replaced it until
+                // something else happened to run the update block.
+                if (surfaceOwner[0] === playerView) {
+                    surfaceOwner[0] = null
+                    playerView.onPause()
+                }
             },
         )
 
@@ -572,18 +587,6 @@ fun TvPlayerScreen(
     isFullScreen: Boolean,
     onFullScreenChange: (Boolean) -> Unit,
 ) {
-    // This screen is where a video is actually shown. While it is on screen a video
-    // switch waits for its first frame before resuming, so the picture and the sound
-    // arrive together; while it is not, there is nothing to render a frame onto and
-    // waiting for one would only be silence.
-    LaunchedEffect(playerConnection) {
-        playerConnection?.service?.setTvPlayerVisible(true)
-        try {
-            kotlinx.coroutines.awaitCancellation()
-        } finally {
-            playerConnection?.service?.setTvPlayerVisible(false)
-        }
-    }
     // The queue opened over the media is the first thing Back closes: leaving it
     // open and dropping straight out of fullscreen throws away the way out.
     var fullscreenQueueOpen by remember { mutableStateOf(false) }
@@ -681,6 +684,24 @@ fun TvPlayerScreen(
     // We avoid early return to show loading UI when service not ready.
     val effectivePlayerConnection = playerConnection ?: LocalPlayerConnection.current
 
+    // This screen is where a video is actually shown. While it is on screen a video
+    // switch waits for its first frame before resuming, so the picture and the sound
+    // arrive together; while it is not, there is nothing to render a frame onto and
+    // waiting for one would only be silence.
+    //
+    // Driven by whichever connection the screen actually resolved rather than the one
+    // it was handed. Reading the handed one left the service believing nobody was
+    // watching whenever the connection came from the composition instead, so every
+    // switch paid the full wait for a frame nothing was going to render.
+    LaunchedEffect(effectivePlayerConnection) {
+        effectivePlayerConnection?.service?.setTvPlayerVisible(true)
+        try {
+            kotlinx.coroutines.awaitCancellation()
+        } finally {
+            effectivePlayerConnection?.service?.setTvPlayerVisible(false)
+        }
+    }
+
     // Collect state from the resolved connection; if null, show loading/empty state
     val currentSong by effectivePlayerConnection?.currentSong?.collectAsState(null) ?: remember { mutableStateOf(null) }
     val currentMediaMetadata by effectivePlayerConnection?.mediaMetadata?.collectAsState(null) ?: remember { mutableStateOf(null) }
@@ -740,7 +761,12 @@ fun TvPlayerScreen(
     // The slots the remote walks, in the order they sit on screen. The lyrics toggle
     // has nowhere to go while a video owns the picture, so the row closes up around
     // it instead of stepping onto a button that was never drawn.
-    val transportSlots = remember(videoModeEnabled) {
+    //
+    // Keyed on what the row is actually built from. Keying it on video mode alone
+    // meant a video that arrived as a video - which never turns video mode on at all -
+    // left the row describing a layout that no longer existed, and the remote walked
+    // onto a lyrics button that was no longer drawn and went nowhere.
+    val transportSlots = remember(showVideo, availableSubtitles.isNotEmpty()) {
         buildList {
             add(FULLSCREEN_PREVIOUS_SLOT)
             add(FULLSCREEN_REWIND_SLOT)
@@ -768,6 +794,22 @@ fun TvPlayerScreen(
         focusedTransport = target
         wakeControls()
         runCatching { transportFocus[target].requestFocus() }
+    }
+
+    // The remote's next and previous.
+    //
+    // While a video is playing, the playlist holds that video and nothing else - a
+    // television has one owner of its queue - so a raw seek, which moves through a
+    // music queue, has nothing to move to and the button does nothing at all. The
+    // video pipeline keeps the list of what comes next and can start it.
+    fun skipNext() {
+        if (guestVideoActive) com.auramusic.app.video.VideoPlaybackManager.playNext()
+        else pc?.seekToNext()
+    }
+
+    fun skipPrevious() {
+        if (guestVideoActive) com.auramusic.app.video.VideoPlaybackManager.playPrevious()
+        else pc?.seekToPrevious()
     }
 
     fun focusTransportSlot(slot: Int) {
@@ -924,7 +966,16 @@ fun TvPlayerScreen(
     // has player artwork, lyrics and video state.
     val mediaMetadata = currentSong?.toMediaMetadata() ?: currentMediaMetadata
 
-    LaunchedEffect(mediaMetadata?.id, mediaMetadata?.isVideoSong, videoModeToggleEnabled) {
+    // Keyed on whether a video is already playing as one. Without it the guard below
+    // was read once, when the effect started, so a video started while the effect was
+    // still waiting on the network was switched to video mode a moment later - which
+    // is the switch that pauses a playing video and never brings it back.
+    LaunchedEffect(
+        mediaMetadata?.id,
+        mediaMetadata?.isVideoSong,
+        videoModeToggleEnabled,
+        guestVideoActive,
+    ) {
         val videoId = mediaMetadata?.id ?: return@LaunchedEffect
         val playerConnection = pc ?: return@LaunchedEffect
 
@@ -1296,7 +1347,7 @@ fun TvPlayerScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         TvPlayerControlButton(
-                            onClick = { pc?.seekToPrevious() },
+                            onClick = { skipPrevious() },
                             icon = Icons.Filled.SkipPrevious,
                             contentDescription = "Previous song",
                             size = sideControlSize,
@@ -1332,7 +1383,7 @@ fun TvPlayerScreen(
                         )
 
                         TvPlayerControlButton(
-                            onClick = { pc?.seekToNext() },
+                            onClick = { skipNext() },
                             icon = Icons.Filled.SkipNext,
                             contentDescription = "Next song",
                             size = sideControlSize,
@@ -1780,7 +1831,7 @@ fun TvPlayerScreen(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             TvPlayerControlButton(
-                                onClick = { pc?.seekToPrevious() },
+                                onClick = { skipPrevious() },
                                 icon = Icons.Filled.SkipPrevious,
                                 contentDescription = "Previous song",
                                 focusRequester = transportFocus[FULLSCREEN_PREVIOUS_SLOT],
@@ -1828,7 +1879,7 @@ fun TvPlayerScreen(
                                 },
                             )
                             TvPlayerControlButton(
-                                onClick = { pc?.seekToNext() },
+                                onClick = { skipNext() },
                                 icon = Icons.Filled.SkipNext,
                                 contentDescription = "Next song",
                                 focusRequester = transportFocus[FULLSCREEN_NEXT_SLOT],

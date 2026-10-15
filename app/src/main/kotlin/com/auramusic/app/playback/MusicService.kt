@@ -1609,6 +1609,13 @@ class MusicService :
          * too many errors come up too quickly. Pause to show player "stopped" state
          */
         consecutivePlaybackErr += 2
+        // A video is its own playlist, so there is nothing to skip to and the window
+        // it would land on is itself - restarting a video that has just failed, in a
+        // loop, rather than moving past it.
+        if (_guestVideoActive.value) {
+            player.pause()
+            return
+        }
         val nextWindowIndex = player.nextMediaItemIndex
 
         if (consecutivePlaybackErr <= MAX_CONSECUTIVE_ERR && nextWindowIndex != C.INDEX_UNSET) {
@@ -1874,6 +1881,14 @@ class MusicService :
      */
     fun playGuestVideoSource(source: MediaSource, startPositionMs: Long = 0L) {
         if (!_guestVideoActive.value) {
+            // Video mode's state describes a song that was playing as a video, and any
+            // switch still running was started against the music playlist and is about
+            // to rewrite whatever is on the player. Clearing it here cancels that
+            // switch and drops the state together: carrying it would report video mode
+            // on for a video that needs no switching, hand sponsor-block lookups the
+            // wrong video's id, and let a playback error try to restore an audio item
+            // that has nothing to do with this one.
+            resetVideoMode()
             if (queuePersistenceEnabled) saveQueueToDiskNow()
             _guestVideoActive.value = true
         }
@@ -2621,7 +2636,12 @@ class MusicService :
                 resetRetryCount(mediaId)
                 Timber.tag(TAG).d("Playback successful for $mediaId, reset retry count")
             }
-            scheduleAutomix()
+            // Not while a video is playing. Automix clones the playlist onto a second
+            // player and then swaps that player in, and cloning a video playlist
+            // carries its sources with it - while the swap detaches the very player
+            // the video is on, leaving it playing on a surface nobody is showing and
+            // no longer receiving the events that end it.
+            if (!_guestVideoActive.value) scheduleAutomix()
         }
 
         if (playbackState == Player.STATE_IDLE || playbackState == Player.STATE_ENDED) {
@@ -4392,7 +4412,14 @@ class MusicService :
                 videoFirstFrameListener = null
             }
         }
-        player.playWhenReady = wasPlaying
+        // Only if the player is still where the switch paused it. Whoever pressed
+        // play in those three seconds was answering the silence they were hearing,
+        // and being paused again at the end of it - once, right as the picture
+        // arrived - reads as the app ignoring the button rather than finishing a
+        // switch they never asked about.
+        if (!player.playWhenReady) {
+            player.playWhenReady = wasPlaying
+        }
     }
 
     /**
@@ -4457,6 +4484,16 @@ class MusicService :
             return
         }
 
+        // A video that arrived as a video is already on the player carrying its own
+        // picture. Asking the service to switch this item to video mode is asking it
+        // to replace the thing that is playing with a video of the same name, and
+        // there is no music item here to replace it with - so all it would do is
+        // rewrite the guest video's playlist out from under it.
+        if (_guestVideoActive.value) {
+            Timber.d("setVideoMode: Guest video owns the player, leaving it alone")
+            return
+        }
+
         Timber.d("setVideoMode: Current mediaId: $mediaId")
         android.util.Log.d("MusicService", ">>> Current mediaId: $mediaId")
 
@@ -4479,8 +4516,13 @@ class MusicService :
                         _isVideoSwitching.value = true
                     }
                     
-                    // Save original item before switching
-                    originalAudioMediaItem = player.getMediaItemAt(index)
+                    // Save original item before switching.
+                    // The player can be empty between stopping and the next item
+                    // landing, and indexing a playlist that is not there throws -
+                    // which used to end up here as a caught exception that left
+                    // video mode reported as on while nothing was in video mode.
+                    originalAudioMediaItem =
+                        if (index >= 0 && index < player.mediaItemCount) player.getMediaItemAt(index) else null
 
                     // Get song info for video search fallback
                     val metadata = currentMediaMetadata.value
@@ -4644,6 +4686,23 @@ class MusicService :
                                     return@launch
                                 }
 
+                                // Everything above this point is network work, and it
+                                // can take twenty seconds. In that time the listener
+                                // may have started a video of their own, which clears
+                                // the playlist this is about to index into. Writing to
+                                // it now would splice a music item into a video and
+                                // leave both on the player, so the switch is abandoned
+                                // instead of finishing over whatever came next.
+                                if (_guestVideoActive.value ||
+                                    index < 0 ||
+                                    index >= player.mediaItemCount
+                                ) {
+                                    Timber.d("setVideoMode: Player moved on while the video was loading, abandoning switch")
+                                    restoreTvPlaybackIfPaused(wasPlaying)
+                                    resetVideoMode()
+                                    return@launch
+                                }
+
                                 val currentItem = player.getMediaItemAt(index)
                                 Timber.d("setVideoMode: Current media item URI: ${currentItem.localConfiguration?.uri}")
 
@@ -4777,18 +4836,20 @@ class MusicService :
                         player.seekTo(index, position)
                         player.playWhenReady = wasPlaying
                     }
-                    isVideoMode = false
-                    _videoModeEnabled.value = false
-                    currentVideoUrl = null
-                    currentVideoSourceMediaId = null
-                    originalAudioMediaItem = null
                     Timber.d("setVideoMode: Switched back to audio")
+                    // Cleared last so it covers the video's own state too. The subtitle
+                    // list in particular outlived the video it belonged to, so a player
+                    // still offering tracks for a video that was no longer loaded had
+                    // nothing to select.
+                    resetVideoMode()
                 }
             } catch (e: Exception) {
                 Timber.e(e, "setVideoMode: Failed")
-                isVideoMode = false
-                _videoModeEnabled.value = false
-                originalAudioMediaItem = null
+                // Everything that was set on the way in is cleared together, so a
+                // switch that failed half way cannot leave a video mode reported as
+                // on, a subtitle list with nothing to apply it to, or a saved audio
+                // item that a later playback error would try to put back.
+                resetVideoMode()
                 if (isTvDevice && !player.playWhenReady) {
                     player.playWhenReady = true
                 }

@@ -941,13 +941,6 @@ object VideoPlaybackManager {
         if (!state.autoplayEnabled) return
         val currentId = state.session?.videoId ?: return
 
-        // A television keeps its own queue, and the music service advances it. This
-        // lookahead appends the next video to the player's playlist so the end of one
-        // is a native advance - which on a television is a second, independent way of
-        // moving forward. Two of them means one press of next crosses two videos, and
-        // the video that flickers into place is the one being stepped over. So on a
-        // television the playlist is left to the one owner it has.
-        if (isTelevision(currentContext)) return
         // Everything in the queue has been played - the page this video was recommended
         // from is finite, and the ones in front of it have all been watched. Rather than
         // let the session stop dead, the recommendations are topped up from what has
@@ -962,6 +955,16 @@ object VideoPlaybackManager {
                 }
             }
         }
+
+        // A television keeps its own queue, and the music service advances it. What
+        // follows appends the next video to the player's playlist so the end of one is
+        // a native advance - which on a television is a second, independent way of
+        // moving forward. Two of them means one press of next crosses two videos, and
+        // the video that flickers into place is the one being stepped over. So on a
+        // television the playlist is left to the one owner it has, and the queue
+        // above is all that needs to be kept: it is what the next button reads.
+        if (isTelevision(currentContext)) return
+
         val refreshed = _uiState.value
         val nextItem = refreshed.queue.firstOrNull { it.videoId != currentId && it.videoId !in playedVideoIds }
             ?: return

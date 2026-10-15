@@ -1352,8 +1352,12 @@ fun TvPlaybackSettingsScreen(
 
         item {
             TvContentToggleRow(
-                title = "Video Mode",
-                subtitle = "Play music videos when available",
+                title = "Auto video mode",
+                // Says what it now decides. A video that is tapped plays as a video
+                // whatever this is set to; what this decides is whether a video song
+                // that starts on its own - reached by playing on, by a radio, by a
+                // queue - is looked up and shown, or left as the song it already is.
+                subtitle = "Show the video for video songs that start by playing on",
                 checked = videoModeEnabled,
                 onCheckedChange = onVideoModeEnabledChange,
                 icon = Icons.Filled.MusicNote,
