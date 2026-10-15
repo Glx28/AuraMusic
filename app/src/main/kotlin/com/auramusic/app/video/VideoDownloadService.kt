@@ -63,7 +63,15 @@ class VideoDownloadService : android.app.Service() {
     @Volatile private var lastNotifiedPercent: Int = -1
     @Volatile private var lastNotifiedBytes: Long = 0L
 
-    private val client: OkHttpClient by lazy {
+    private val client: OkHttpClient by lazy { httpClient(VideoBlockDownloader.DEFAULT_THREADS) }
+
+    /**
+     * A client with a connection pool to match how much is being fetched at once.
+     *
+     * A pool sized for one connection is what a multi-block transfer ends up waiting
+     * on: the blocks are ready to go and there is nowhere for them to go.
+     */
+    private fun httpClient(threads: Int): OkHttpClient =
         OkHttpClient.Builder()
             .proxy(com.auramusic.innertube.YouTube.proxy)
             .proxyAuthenticator { _, response ->
@@ -73,13 +81,27 @@ class VideoDownloadService : android.app.Service() {
                         .build()
                 } ?: response.request
             }
+            .apply {
+                runCatching {
+                    connectionPool(
+                        okhttp3.ConnectionPool(
+                            maxIdleConnections = (threads * 2).coerceAtLeast(4),
+                            keepAliveDuration = 5,
+                            java.util.concurrent.TimeUnit.MINUTES,
+                        ),
+                    )
+                    retryOnConnectionFailure(true)
+                }
+            }
             .build()
-    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        // Made before anything can ask for a notification to be posted on it, and
+        // never waited on: the announcement that follows needs this to exist and
+        // nothing else.
         createVideoDownloadChannel(CHANNEL_ID)
         // The service outlives the screen that asked for a download, so the record of
         // what was asked for is read here rather than being carried in the intent: a
@@ -93,28 +115,34 @@ class VideoDownloadService : android.app.Service() {
 
         // A service started in the foreground has to be in the foreground within a few
         // seconds - and "a few" is measured from startForegroundService(), not from here.
-        // So nothing is read, loaded or awaited on the way to the notification: what it
-        // needs to say arrived with the intent, and it is posted from that alone. The
-        // clock does not wait for a store to be read, a dispatcher to be free or a
-        // main thread to finish what it was doing.
         //
-        // When it cannot go up - every channel the listener has turned off, or the
-        // app's notifications turned off in between asking and arriving - a service
-        // that was started as a foreground one stands down at once rather than sitting
-        // there being timed out. One that was not goes on to fetch unannounced.
+        // So the first thing this does is post a notification built from nothing but
+        // the channel made in onCreate and the details the intent carried. No store is
+        // read, no dispatcher is waited on, no channel is looked up: every one of those
+        // is a way to spend a budget that does not grow, and a service that spends it
+        // is a process the system kills, taking the download with it. Whether the
+        // download is even wanted is decided afterwards, not before.
         val requiresForeground =
             intent?.getBooleanExtra(EXTRA_REQUIRES_FOREGROUND, false) == true
         val requested = if (action == ACTION_DOWNLOAD) requestFrom(intent) else null
         if (action == ACTION_DOWNLOAD) {
-            val announced = promoteForeground(
-                request = requested,
-                videoId = videoId,
-                downloaded = 0L,
-                total = 0L,
-            )
-            if (!announced && requiresForeground) {
-                stopSelf()
-                return START_NOT_STICKY
+            val announced = announceImmediately(requested, videoId)
+            when {
+                !announced && requiresForeground -> {
+                    // Promised the system a notification and could not keep that
+                    // promise. Standing down at once is the only way not to be killed
+                    // for it; a transfer that was never announced is not worth a
+                    // crash, and it is still in the list to be tried again.
+                    failUnstartable(videoId)
+                    return START_NOT_STICKY
+                }
+                // Announced, but nothing to fetch: an id that never arrived. Rather
+                // than sit in the foreground claiming a transfer that is not happening.
+                !announced || videoId.isBlank() -> {
+                    runCatching { stopForegroundCompat() }
+                    failUnstartable(videoId)
+                    return START_NOT_STICKY
+                }
             }
         }
 
@@ -207,12 +235,12 @@ class VideoDownloadService : android.app.Service() {
             }
 
             // How big the video is has to be known before the first byte is written, or
-            // there is nothing for a percentage to be a percentage of. The lengths are
-            // asked for up front - one cheap request per part, answered from headers
-            // and closed again - so the bar moves smoothly from the first second
-            // instead of sitting at nothing until the last stream begins.
+            // there is nothing for a percentage to be a percentage of. A stream URL
+            // usually states its own length, so that is read first and a request is
+            // only made to ask when it does not.
+            val downloader = VideoBlockDownloader { threads -> httpClient(threads) }
             val partLengths = parts.associate { part ->
-                part.name to remoteLength(part.url)
+                part.name to downloader.lengthOf(part.url, VideoBlockDownloader.stripRangeParam(part.url), client)
             }.toMutableMap()
             val partDownloaded = parts.associate { it.name to 0L }.toMutableMap()
             var downloaded = 0L
@@ -236,29 +264,29 @@ class VideoDownloadService : android.app.Service() {
 
             for (part in parts) {
                 val temporary = File(dir, "${part.name}.part")
-                val httpRequest = Request.Builder().url(part.url).build()
-                client.newCall(httpRequest).execute().use { response ->
-                    if (!response.isSuccessful) error("HTTP ${response.code}")
-                    val body = response.body ?: error("Empty body")
-                    val contentLength = body.contentLength().coerceAtLeast(0L)
-                    // The response knows its own length, so the up-front estimate is
-                    // replaced by the real one the moment there is one.
-                    if (contentLength > 0L) partLengths[part.name] = contentLength
-                    body.byteStream().use { input ->
-                        temporary.outputStream().buffered().use { output ->
-                            val buffer = ByteArray(64 * 1024)
-                            var read: Int
-                            while (input.read(buffer).also { read = it } != -1) {
-                                output.write(buffer, 0, read)
-                                downloaded += read
-                                partDownloaded[part.name] = (partDownloaded[part.name] ?: 0L) + read
-                                val total = totalBytes()
-                                store.updateProgress(videoId, downloaded, total)
-                                notifyProgress(request, videoId, downloaded, total)
-                            }
-                        }
-                    }
-                }
+                // Taken in blocks, several at a time. One connection answers a video
+                // exactly as fast as one request can be made however fast the link is,
+                // and a block that fails is fetched again on its own rather than
+                // failing the whole transfer with everything already on disk.
+                downloader.download(
+                    url = part.url,
+                    target = temporary,
+                    totalBytes = partLengths[part.name] ?: 0L,
+                    threads = DOWNLOAD_THREADS,
+                    onTotalChanged = { real ->
+                        // The remote has told us the real length; a bar drawn against
+                        // the wrong one is worse than one that settles a moment later.
+                        partLengths[part.name] = real
+                    },
+                    onBytes = { writtenForPart, partTotal ->
+                        partDownloaded[part.name] = writtenForPart
+                        if (partTotal > 0L) partLengths[part.name] = partTotal
+                        downloaded = partDownloaded.values.sum()
+                        val total = totalBytes()
+                        store.updateProgress(videoId, downloaded, total)
+                        notifyProgress(request, videoId, downloaded, total)
+                    },
+                )
                 // Renamed out of the temporary name only once it is whole, so a file that
                 // is still arriving can never be mistaken for one that is finished.
                 val final = File(dir, part.name)
@@ -303,39 +331,6 @@ class VideoDownloadService : android.app.Service() {
     private fun partsFor(videoId: String) = listOf("$videoId.mp4", "$videoId.v", "$videoId.a")
 
     private class Part(val name: String, val url: String)
-
-    /**
-     * How long the remote says the file at [url] is, or 0 when it will not say.
-     *
-     * Asked with a single ranged byte where the CDN allows it, because that is the
-     * cheapest way to be told a length without starting the transfer; a plain header
-     * request is tried first and a refused one falls back to that.
-     */
-    private fun remoteLength(url: String): Long {
-        runCatching {
-            client.newCall(Request.Builder().url(url).head().build()).execute().use { response ->
-                if (response.isSuccessful) {
-                    response.header("Content-Length")?.toLongOrNull()?.takeIf { it > 0L }
-                } else {
-                    null
-                }
-            }
-        }.getOrNull()?.takeIf { it > 0L }?.let { return it }
-
-        return runCatching {
-            client.newCall(
-                Request.Builder().url(url).header("Range", "bytes=0-0").build(),
-            ).execute().use { response ->
-                // A ranged answer carries the whole length in Content-Range rather than
-                // in Content-Length, which would only ever be the one byte asked for.
-                response.header("Content-Range")
-                    ?.substringAfterLast('/')
-                    ?.toLongOrNull()
-                    ?.takeIf { it > 0L }
-                    ?: response.header("Content-Length")?.toLongOrNull()?.takeIf { it > 0L }
-            }
-        }.getOrNull() ?: 0L
-    }
 
     // ------------------------------------------------------------------ notification
 
@@ -404,12 +399,58 @@ class VideoDownloadService : android.app.Service() {
     }
 
     /**
-     * Posts the ongoing notification for the fetch in hand.
+     * Puts the service in the foreground before doing anything else.
      *
-     * True when this service is now in the foreground - or was never required to be,
-     * because nothing can be announced at all. False means it promised a notification
-     * to the system and could not keep that promise, which is something the caller has
-     * to act on rather than something to shrug at.
+     * Deliberately the cheapest thing this service can do: it builds one notification
+     * from the channel already created and the details already carried, and hands it
+     * straight over. It asks the system nothing - no channel to be looked up, no
+     * notifications to be checked, nothing read - because every one of those is time
+     * taken out of a deadline that is already running, and a service that misses it is
+     * killed rather than reported.
+     *
+     * True when the service is now in the foreground. False means it promised the
+     * system a notification and could not keep that promise, which the caller has to
+     * act on rather than shrug at.
+     */
+    private fun announceImmediately(
+        request: VideoDownloadStore.Request?,
+        videoId: String,
+    ): Boolean {
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.download)
+            .setContentTitle(
+                request?.title?.takeIf { it.isNotBlank() }
+                    ?: videoId.takeIf { it.isNotBlank() }
+                    ?: getString(R.string.video_downloads),
+            )
+            .setContentText(getString(R.string.video_downloading))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(getString(R.string.video_downloading)))
+            .setOnlyAlertOnce(true)
+            .setOngoing(true)
+            // Nothing is known yet, which is said plainly rather than filled in with
+            // a zero that would read as "none downloaded, none to come".
+            .setProgress(0, 0, true)
+            .setContentIntent(appIntent(videoId))
+            .build()
+
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForegroundSafely(
+                FOREGROUND_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+        } else {
+            startForegroundSafely(FOREGROUND_ID, notification)
+        }
+    }
+
+    /**
+     * Repoints the ongoing notification at where the transfer has got to.
+     *
+     * Only ever called after the service is already in the foreground, so unlike the
+     * announcement above this one can afford to ask the system which channel it can
+     * actually post on - a channel the listener has turned off cannot be posted to,
+     * and one that is left blocked is a notification that stops appearing mid-transfer.
      */
     private fun promoteForeground(
         request: VideoDownloadStore.Request?,
@@ -507,10 +548,11 @@ class VideoDownloadService : android.app.Service() {
             startForeground(id, notification, type)
             true
         } catch (e: RuntimeException) {
+            // The system can still say no: the daily limit on background data work, a
+            // start it decided was not allowed, a channel turned off since we last
+            // looked. None of those are worth a crash report.
             Timber.tag(TAG).e(e, "Refused the foreground; the download will not be announced")
             runCatching { stopForegroundCompat() }
-            store.markFailed(currentVideoId())
-            stopSelf()
             false
         }
     }
@@ -522,14 +564,21 @@ class VideoDownloadService : android.app.Service() {
         } catch (e: RuntimeException) {
             Timber.tag(TAG).e(e, "Refused the foreground; the download will not be announced")
             runCatching { stopForegroundCompat() }
-            store.markFailed(currentVideoId())
-            stopSelf()
             false
         }
     }
 
-    /** Whatever this service was last asked to fetch, for reporting a refusal against. */
-    private fun currentVideoId(): String = jobs.keys.firstOrNull().orEmpty()
+    /**
+     * Fails a transfer the service could not start.
+     *
+     * Marked failed rather than left pending: a download that is on the list but is
+     * not moving is indistinguishable from one that has hung, and the only way back
+     * from a hang is to clear it and ask again.
+     */
+    private fun failUnstartable(videoId: String) {
+        if (videoId.isNotBlank()) store.markFailed(videoId)
+        stopSelf()
+    }
 
     /**
      * Keeps the ongoing notification describing what is still moving.
@@ -641,6 +690,15 @@ class VideoDownloadService : android.app.Service() {
 
         /** Progress worth re-rendering the notification for: a whole percent, or a chunk. */
         private const val NOTIFY_STEP_BYTES = 512 * 1024L
+
+        /**
+         * How many parts of a file are fetched at once.
+         *
+         * Three is enough to fill a normal connection without crowding it: past that
+         * the requests spend longer queueing than transferring, and a connection that
+         * is already busy has nothing to give the extra ones.
+         */
+        private const val DOWNLOAD_THREADS = VideoBlockDownloader.DEFAULT_THREADS
 
         const val ACTION_DOWNLOAD = "com.auramusic.app.video.DOWNLOAD"
         const val ACTION_CANCEL = "com.auramusic.app.video.CANCEL"
