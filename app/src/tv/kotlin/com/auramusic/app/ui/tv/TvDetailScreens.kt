@@ -49,6 +49,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
@@ -58,6 +59,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.media3.common.util.UnstableApi
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -88,6 +90,7 @@ import kotlinx.coroutines.launch
 import com.auramusic.app.extensions.toMediaItem
 import com.auramusic.app.playback.PlayerConnection
 import com.auramusic.app.playback.queues.ListQueue
+import com.auramusic.app.ui.component.AuraCanvasImage
 import com.auramusic.app.viewmodels.LibraryAlbumsViewModel
 import com.auramusic.app.viewmodels.LibraryArtistsViewModel
 import com.auramusic.app.viewmodels.LibraryPlaylistsViewModel
@@ -213,6 +216,10 @@ fun TvAlbumDetailScreen(albumId: String, playerConnection: PlayerConnection?, on
         showLikeButton = showAlbumLike,
         isLiked = isAlbumLiked,
         onLikeClick = onAlbumLikeClick,
+        // An album's canvas is looked up by the album and who made it; a playlist has
+        // neither, so it gets the artwork alone.
+        backdropArtist = displaySubtitle,
+        backdropAlbum = displayTitle,
     )
 }
 
@@ -321,6 +328,17 @@ fun TvArtistDetailScreen(artistId: String, playerConnection: PlayerConnection?, 
     LaunchedEffect(Unit) {
         runCatching { backButtonFocus.requestFocus() }
     }
+
+    // Behind the whole screen, not inside any one row: the artist's own picture stays
+    // put while the shelves scroll under it.
+    Box(modifier = Modifier.fillMaxSize()) {
+        TvCanvasBackdrop(
+            backdropTitle = displayTitle,
+            // An artist has no album to be looked up against, only themselves.
+            backdropArtist = displayTitle,
+            backdropAlbum = null,
+            imageUrl = displayThumbnail,
+        )
 
     LazyColumn(
         modifier = Modifier
@@ -530,6 +548,7 @@ fun TvArtistDetailScreen(artistId: String, playerConnection: PlayerConnection?, 
             }
         }
     }
+    }
 }
 
 /* ------------------------------ Playlist ------------------------------ */
@@ -626,6 +645,63 @@ fun TvArtistDetailScreen(artistId: String, playerConnection: PlayerConnection?, 
 
 /* ------------------------------ Layout ------------------------------ */
 
+/**
+ * The artwork behind a detail screen, edge to edge.
+ *
+ * The same canvas the phone puts behind an album or an artist, moved here to fill the
+ * whole panel and pushed all the way back: the television has the width for a picture
+ * to be seen rather than described, and a screen that has one album's colours behind
+ * it reads as that album's own page rather than as a list.
+ *
+ * [backdropTitle] is what the canvas is looked up by when the preference is on; the
+ * artwork itself is shown either way, so the backdrop is there before the canvas
+ * resolves and is not taken away if it never does.
+ */
+@Composable
+fun TvCanvasBackdrop(
+    backdropTitle: String,
+    backdropArtist: String?,
+    backdropAlbum: String?,
+    imageUrl: String?,
+    modifier: Modifier = Modifier,
+    /**
+     * What is laid over the picture. The player and the detail screens both want this
+     * and want different things: a list is read against the page behind it, a video is
+     * watched against black. Null takes the surface colour, which is the right answer
+     * everywhere but over media.
+     */
+    scrimColor: Color? = null,
+) {
+    Box(modifier = modifier.fillMaxSize()) {
+        if (!imageUrl.isNullOrBlank() || backdropTitle.isNotBlank()) {
+            @UnstableApi
+            AuraCanvasImage(
+                title = backdropTitle.ifBlank { null },
+                artist = backdropArtist?.ifBlank { null },
+                album = backdropAlbum?.ifBlank { null },
+                staticImageUrl = imageUrl,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        // A backdrop is only a backdrop if what is written over it can still be read.
+        // Heavier towards the bottom, where the rows are densest, and never fully clear
+        // anywhere: a title sitting on a bright cover is unreadable at any distance.
+        val behind = scrimColor ?: MaterialTheme.colorScheme.background
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        0f to behind.copy(alpha = 0.72f),
+                        0.55f to behind.copy(alpha = 0.84f),
+                        1f to behind.copy(alpha = 0.94f),
+                    ),
+                ),
+        )
+    }
+}
+
 @Composable
 private fun TvDetailLayout(
     title: String,
@@ -641,6 +717,9 @@ private fun TvDetailLayout(
     showLikeButton: Boolean = false,
     isLiked: Boolean = false,
     onLikeClick: () -> Unit = {},
+    /** Who the page belongs to, for the canvas backdrop. Null when there is nobody. */
+    backdropArtist: String? = null,
+    backdropAlbum: String? = null,
 ) {
     val backButtonFocus = focusRequester ?: remember { FocusRequester() }
     // Tracks whether the back button currently holds focus. We only steal
@@ -652,6 +731,17 @@ private fun TvDetailLayout(
     LaunchedEffect(Unit) {
         runCatching { backButtonFocus.requestFocus() }
     }
+
+    // The backdrop sits behind the whole screen rather than inside any one row, so it
+    // stays put while the list scrolls under it instead of scrolling away with the
+    // first item.
+    Box(modifier = Modifier.fillMaxSize()) {
+        TvCanvasBackdrop(
+            backdropTitle = title,
+            backdropArtist = backdropArtist,
+            backdropAlbum = backdropAlbum,
+            imageUrl = thumbnailUrl,
+        )
 
     LazyColumn(
         modifier = Modifier
@@ -776,6 +866,7 @@ private fun TvDetailLayout(
                 )
             }
         }
+    }
     }
 }
 

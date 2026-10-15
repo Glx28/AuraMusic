@@ -308,7 +308,7 @@ class VideoDownloadStore @Inject constructor(
         val request = _requests.value[videoId] ?: return
         scope.launch {
             enqueue(request)
-            startServiceOnMainThread(videoId)
+            startServiceOnMainThread(request)
         }
     }
 
@@ -322,7 +322,7 @@ class VideoDownloadStore @Inject constructor(
     fun download(request: Request) {
         scope.launch {
             enqueue(request)
-            startServiceOnMainThread(request.videoId)
+            startServiceOnMainThread(request)
         }
     }
 
@@ -336,9 +336,9 @@ class VideoDownloadStore @Inject constructor(
      * missing the deadline. The call itself is cheap; it is the thread it is made from
      * that matters.
      */
-    private suspend fun startServiceOnMainThread(videoId: String) {
+    private suspend fun startServiceOnMainThread(request: Request) {
         withContext(Dispatchers.Main.immediate) {
-            VideoDownloadService.start(context, videoId)
+            VideoDownloadService.start(context, request)
         }
     }
 

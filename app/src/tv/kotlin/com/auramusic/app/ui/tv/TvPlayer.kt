@@ -854,31 +854,28 @@ fun TvPlayerScreen(
         color = MaterialTheme.colorScheme.background,
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            // Background with album art blur (full screen)
-            mediaMetadata?.thumbnailUrl?.let { thumbnailUrl ->
-                AsyncImage(
-                    model = thumbnailUrl,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                )
+            // The backdrop is the song's own canvas - the same one the phone puts
+            // behind its player - and it changes with what is playing, because it is
+            // looked up by title and artist rather than being a fixed picture. Black
+            // under it, so a song with no artwork yet has somewhere to go.
+            //
+            // Only when fullscreen is not drawing its own: a canvas is a playing video,
+            // and two of them would be two decoders for one picture.
+            if (!isFullScreen) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(
-                                    Color.Black.copy(alpha = 0.7f),
-                                    Color.Black.copy(alpha = 0.9f)
-                                )
-                            )
-                        )
+                        .background(Color.Black),
                 )
-            } ?: Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.9f))
-            )
+                TvCanvasBackdrop(
+                    backdropTitle = mediaMetadata?.title.orEmpty(),
+                    backdropArtist = mediaMetadata?.artists?.joinToString(", ") { it.name },
+                    backdropAlbum = mediaMetadata?.album?.title,
+                    imageUrl = mediaMetadata?.thumbnailUrl,
+                    // Media is watched against black, not against the page colour.
+                    scrimColor = Color.Black,
+                )
+            }
 
             sleepTimerMessage?.let { message ->
                 Surface(
@@ -1402,7 +1399,7 @@ fun TvPlayerScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .zIndex(3f)
-                        .background(Color.Black)
+                        .background(if (isFullScreen) Color.Black else Color.Transparent)
                         .onPreviewKeyEvent { event ->
                             if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                             wakeTick++
@@ -1429,6 +1426,19 @@ fun TvPlayerScreen(
                             }
                         },
                 ) {
+                    // The same canvas as the split view, carried into fullscreen so
+                    // expanding the player does not throw the song's picture away. A
+                    // video covers it; lyrics and artwork are read against it. The
+                    // split view stands its own down for this one rather than playing
+                    // two canvases at once.
+                    TvCanvasBackdrop(
+                        backdropTitle = mediaMetadata?.title.orEmpty(),
+                        backdropArtist = mediaMetadata?.artists?.joinToString(", ") { it.name },
+                        backdropAlbum = mediaMetadata?.album?.title,
+                        imageUrl = mediaMetadata?.thumbnailUrl,
+                        scrimColor = Color.Black,
+                    )
+
                     when {
                         videoModeEnabled -> TvVideoView(
                             activePlayer = activePlayer,

@@ -19,6 +19,8 @@ import androidx.core.content.ContextCompat
 import androidx.media3.common.util.Util
 import com.auramusic.app.MainActivity
 import com.auramusic.app.R
+import com.auramusic.app.constants.VideoCodec
+import com.auramusic.app.constants.VideoQuality
 import com.auramusic.app.utils.AuraPlayerUtils
 import com.auramusic.auravideo.AuraVideo
 import dagger.hilt.android.AndroidEntryPoint
@@ -91,11 +93,10 @@ class VideoDownloadService : android.app.Service() {
 
         // A service started in the foreground has to be in the foreground within a few
         // seconds - and "a few" is measured from startForegroundService(), not from here.
-        // Anything that can come before the notification is a way to miss that window:
-        // an intent without the id, a video already being fetched, a store that has
-        // not been read yet, a slow main thread. Missing it is not a failed download,
-        // it is the process being killed, and the download it was carrying dies with
-        // it. So the notification goes up first, and the work follows.
+        // So nothing is read, loaded or awaited on the way to the notification: what it
+        // needs to say arrived with the intent, and it is posted from that alone. The
+        // clock does not wait for a store to be read, a dispatcher to be free or a
+        // main thread to finish what it was doing.
         //
         // When it cannot go up - every channel the listener has turned off, or the
         // app's notifications turned off in between asking and arriving - a service
@@ -103,15 +104,22 @@ class VideoDownloadService : android.app.Service() {
         // there being timed out. One that was not goes on to fetch unannounced.
         val requiresForeground =
             intent?.getBooleanExtra(EXTRA_REQUIRES_FOREGROUND, false) == true
+        val requested = if (action == ACTION_DOWNLOAD) requestFrom(intent) else null
         if (action == ACTION_DOWNLOAD) {
-            if (!promoteForeground(videoId, downloaded = 0L, total = 0L) && requiresForeground) {
+            val announced = promoteForeground(
+                request = requested,
+                videoId = videoId,
+                downloaded = 0L,
+                total = 0L,
+            )
+            if (!announced && requiresForeground) {
                 stopSelf()
                 return START_NOT_STICKY
             }
         }
 
         when (action) {
-            ACTION_DOWNLOAD -> if (videoId.isNotBlank()) enqueue(videoId)
+            ACTION_DOWNLOAD -> if (videoId.isNotBlank()) enqueue(videoId, requested)
             ACTION_CANCEL -> if (videoId.isNotBlank()) cancel(videoId)
             ACTION_CANCEL_ALL -> jobs.keys.toList().forEach { cancel(it) }
             // Nothing to resume into: a restart with no job would have nothing to fetch,
@@ -139,11 +147,11 @@ class VideoDownloadService : android.app.Service() {
         super.onDestroy()
     }
 
-    private fun enqueue(videoId: String) {
+    private fun enqueue(videoId: String, request: VideoDownloadStore.Request?) {
         // Already being fetched: the notification for it was raised a moment ago, on
         // the way in, and the fetch already in flight is the one that finishes it.
         if (jobs.containsKey(videoId)) return
-        val job = scope.launch { runDownload(videoId) }
+        val job = scope.launch { runDownload(videoId, request) }
         jobs[videoId] = job
         job.invokeOnCompletion {
             scope.launch {
@@ -165,12 +173,17 @@ class VideoDownloadService : android.app.Service() {
         store.remove(videoId)
     }
 
-    private suspend fun runDownload(videoId: String) {
-        // The record of what was asked for is written before the service is started, but
-        // a process that has just been rebuilt has it on disk rather than in memory, and
-        // a download that cannot find itself has nothing to fetch.
-        store.load()
-        val request = store.request(videoId)
+    private suspend fun runDownload(videoId: String, requested: VideoDownloadStore.Request?) {
+        // What the download is told about itself comes from the request that asked for
+        // it, which arrived with the intent. The stored record is only consulted for a
+        // download this process did not start - a retry, say - so the ordinary path
+        // waits on nothing at all before the first byte moves.
+        val request = requested ?: run {
+            // A restarted process has the download on disk rather than in memory, and
+            // a download that cannot find itself has nothing to fetch.
+            store.load()
+            store.request(videoId)
+        }
         if (request == null) {
             Timber.tag(TAG).w("No record of what %s was meant to be", videoId)
             return
@@ -241,7 +254,7 @@ class VideoDownloadService : android.app.Service() {
                                 partDownloaded[part.name] = (partDownloaded[part.name] ?: 0L) + read
                                 val total = totalBytes()
                                 store.updateProgress(videoId, downloaded, total)
-                                notifyProgress(videoId, downloaded, total)
+                                notifyProgress(request, videoId, downloaded, total)
                             }
                         }
                     }
@@ -377,7 +390,7 @@ class VideoDownloadService : android.app.Service() {
     }
 
     /** The ongoing notification for the fetch in hand. */
-    private fun notifyProgress(videoId: String, downloaded: Long, total: Long) {
+    private fun notifyProgress(request: VideoDownloadStore.Request, videoId: String, downloaded: Long, total: Long) {
         // Progress is announced a few times a second at most. More often than that and
         // the system spends its budget re-rendering a bar nobody can read that fast,
         // which is how a transfer ends up looking like it has stalled.
@@ -387,7 +400,7 @@ class VideoDownloadService : android.app.Service() {
         }
         lastNotifiedPercent = percent
         lastNotifiedBytes = downloaded
-        promoteForeground(videoId, downloaded, total)
+        promoteForeground(request, videoId, downloaded, total)
     }
 
     /**
@@ -398,7 +411,12 @@ class VideoDownloadService : android.app.Service() {
      * to the system and could not keep that promise, which is something the caller has
      * to act on rather than something to shrug at.
      */
-    private fun promoteForeground(videoId: String, downloaded: Long, total: Long): Boolean {
+    private fun promoteForeground(
+        request: VideoDownloadStore.Request?,
+        videoId: String,
+        downloaded: Long,
+        total: Long,
+    ): Boolean {
         val channelId = usableChannelId()
         if (channelId == null) {
             // Nothing can carry the notification, so this cannot be a foreground
@@ -424,9 +442,9 @@ class VideoDownloadService : android.app.Service() {
 
             else -> getString(R.string.video_downloading)
         }
-        // A request that is not there yet - a store read that has not landed, an intent
-        // that lost its extra - still gets a notification: the transfer is happening
-        // either way, and an unnamed one is far better than none.
+        // The transfer is happening either way, so a request that did not arrive intact
+        // still gets a notification: an unnamed one is far better than none, and a
+        // service that promised one and stayed silent is a process the system kills.
         val title = request?.title?.takeIf { it.isNotBlank() }
             ?: videoId.takeIf { it.isNotBlank() }
             ?: getString(R.string.video_downloads)
@@ -522,7 +540,12 @@ class VideoDownloadService : android.app.Service() {
     private fun updateForeground() {
         val remaining = jobs.keys.firstOrNull() ?: return
         val progress = store.progressFor(remaining)
-        promoteForeground(remaining, progress?.downloadedBytes ?: 0L, progress?.totalBytes ?: 0L)
+        promoteForeground(
+            request = store.request(remaining),
+            videoId = remaining,
+            downloaded = progress?.downloadedBytes ?: 0L,
+            total = progress?.totalBytes ?: 0L,
+        )
     }
 
     private fun notifyDone(request: VideoDownloadStore.Request) {
@@ -634,11 +657,35 @@ class VideoDownloadService : android.app.Service() {
          */
         const val EXTRA_REQUIRES_FOREGROUND = "requires_foreground"
 
-        /** Asks for a video. The record of what was asked for is written before this. */
-        fun start(context: Context, videoId: String) {
+        // What the download is, carried with the intent so that naming it never
+        // costs the service any of the seconds it has to announce itself in.
+        const val EXTRA_TITLE = "title"
+        const val EXTRA_CHANNEL = "channel"
+        const val EXTRA_THUMBNAIL = "thumbnail"
+        const val EXTRA_QUALITY = "quality"
+        const val EXTRA_CODEC = "codec"
+        const val EXTRA_DURATION = "duration"
+
+        /**
+     * Asks for a video. The record of what was asked for is written before this.
+     *
+     * Everything the notification needs to name the download travels with the intent
+     * rather than being fetched afterwards. The service has a few seconds from this
+     * call to put a notification up, and reading it out of a store is work that could
+     * be slow, queued behind a dispatcher, or not finished yet - and a service that
+     * spends that window looking things up is a process the system kills, taking the
+     * download with it.
+         */
+        fun start(context: Context, request: VideoDownloadStore.Request) {
             val intent = Intent(context, VideoDownloadService::class.java)
                 .setAction(ACTION_DOWNLOAD)
-                .putExtra(EXTRA_VIDEO_ID, videoId)
+                .putExtra(EXTRA_VIDEO_ID, request.videoId)
+                .putExtra(EXTRA_TITLE, request.title)
+                .putExtra(EXTRA_CHANNEL, request.channelName)
+                .putExtra(EXTRA_THUMBNAIL, request.thumbnailUrl)
+                .putExtra(EXTRA_QUALITY, request.quality.name)
+                .putExtra(EXTRA_CODEC, request.codec.name)
+                .putExtra(EXTRA_DURATION, request.durationMs)
 
             // The foreground flavour, and only ever for this: the service is expected to
             // reach the foreground the moment it is started, and the system kills one
@@ -656,6 +703,22 @@ class VideoDownloadService : android.app.Service() {
             } else {
                 runCatching { context.startService(intent) }
             }
+        }
+
+        /** What the download was asked for, as it arrived with the intent. */
+        private fun requestFrom(intent: Intent?): VideoDownloadStore.Request? {
+            val source = intent ?: return null
+            val videoId = source.getStringExtra(EXTRA_VIDEO_ID).orEmpty()
+            if (videoId.isBlank()) return null
+            return VideoDownloadStore.Request(
+                videoId = videoId,
+                title = source.getStringExtra(EXTRA_TITLE).orEmpty(),
+                channelName = source.getStringExtra(EXTRA_CHANNEL).orEmpty(),
+                thumbnailUrl = source.getStringExtra(EXTRA_THUMBNAIL),
+                quality = VideoQuality.fromName(source.getStringExtra(EXTRA_QUALITY)),
+                codec = VideoCodec.fromName(source.getStringExtra(EXTRA_CODEC)),
+                durationMs = source.getLongExtra(EXTRA_DURATION, 0L),
+            )
         }
 
         fun cancel(context: Context, videoId: String) {
