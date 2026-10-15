@@ -830,6 +830,14 @@ fun TvPlayerScreen(
         // and causes the black-screen-then-loading bug on the 2nd+ re-entry.
         if (videoModeEnabled) return@LaunchedEffect
 
+        // A video played as a video is already on the player, carrying its own
+        // picture. Asking the service to switch this item to video mode is asking it
+        // to replace the very thing that is playing with a video of the same name -
+        // which pauses, re-resolves, and then leaves playback sitting still because
+        // the item it was told about is no longer the one on the player. A video
+        // that arrived as a video is left exactly as it is.
+        if (guestVideoActive) return@LaunchedEffect
+
         // Fast path for TV: if this is a known video song, enable video mode immediately
         // without waiting for the network availability check. The check is still done
         // in parallel to disable if unavailable, but the video starts fetching right away.

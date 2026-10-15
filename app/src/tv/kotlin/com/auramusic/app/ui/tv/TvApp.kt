@@ -6,6 +6,7 @@
 package com.auramusic.app.ui.tv
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.Crossfade
@@ -1307,6 +1308,9 @@ fun TvHomeScreen(
     onNavigateUp: (() -> Unit)? = null,
 ) {
     val navigator = LocalTvNavigator.current
+    // `context` here is the navigator's own function, so the screen's context is
+    // taken under a name that does not shadow it.
+    val tvContext = LocalContext.current
     val viewModel: HomeViewModel = hiltViewModel()
     val quickPicks = viewModel.quickPicks.collectAsState().value
     val forgottenFavorites = viewModel.forgottenFavorites.collectAsState().value
@@ -1421,7 +1425,7 @@ fun TvHomeScreen(
                     onItemFocused = { focusedItem = it },
                     onYTItemClick = { item: YTItem ->
                        when (item) {
-                           is SongItem -> playerConnection?.playQueue(YouTubeQueue(WatchEndpoint(videoId = item.id)))
+                           is SongItem -> TvPlayback.playVideoOrSong(tvContext, playerConnection, navigator, item)
                            is AlbumItem -> {
                                val browseId = item.browseId
                                if (browseId != null) {
@@ -1432,7 +1436,7 @@ fun TvHomeScreen(
                            }
                            is ArtistItem -> item.id?.let { navigator.navigate(TvDestination.Artist(it)) }
                            is PlaylistItem -> navigator.navigate(TvDestination.Playlist(item.id))
-                           is EpisodeItem -> playerConnection?.playQueue(YouTubeQueue(WatchEndpoint(videoId = item.id)))
+                           is EpisodeItem -> TvPlayback.playYtItem(tvContext, playerConnection, navigator, item)
                            is PodcastItem -> item.id?.let { navigator.navigate(TvDestination.Playlist(it)) }
                            else -> {}
                        }
@@ -1449,7 +1453,7 @@ fun TvHomeScreen(
                     SongRow(
                         title = "Quick picks",
                         songs = quickPicks!!,
-                        onSongClick = { song: Song -> playerConnection?.playQueue(YouTubeQueue.radio(song.toMediaMetadata())) },
+                        onSongClick = { song: Song -> TvPlayback.playLibrarySong(tvContext, playerConnection, navigator, song) },
                         onItemFocused = { focusedItem = it },
                         modifier = Modifier.onFocusChanged { state ->
                             if (state.hasFocus) focusedItemIndex = 2
@@ -1463,7 +1467,7 @@ fun TvHomeScreen(
                     SongRow(
                         title = "Forgotten favorites",
                         songs = forgottenFavorites!!,
-                        onSongClick = { song: Song -> playerConnection?.playQueue(YouTubeQueue.radio(song.toMediaMetadata())) },
+                        onSongClick = { song: Song -> TvPlayback.playLibrarySong(tvContext, playerConnection, navigator, song) },
                         onItemFocused = { focusedItem = it },
                         modifier = Modifier.onFocusChanged { state ->
                             if (state.hasFocus) focusedItemIndex = 3
@@ -1582,7 +1586,7 @@ fun TvHomeScreen(
                         onItemFocused = { focusedItem = it },
                         onYTItemClick = { item: YTItem ->
                             when (item) {
-                                is SongItem -> playerConnection?.playQueue(YouTubeQueue(WatchEndpoint(videoId = item.id)))
+                                is SongItem -> TvPlayback.playVideoOrSong(tvContext, playerConnection, navigator, item)
                                 is AlbumItem -> {
                                     val browseId = item.browseId
                                     if (browseId != null) {
@@ -1593,7 +1597,7 @@ fun TvHomeScreen(
                                 }
                                 is ArtistItem -> item.id?.let { navigator.navigate(TvDestination.Artist(it)) }
                                 is PlaylistItem -> navigator.navigate(TvDestination.Playlist(item.id))
-                                is EpisodeItem -> playerConnection?.playQueue(YouTubeQueue(WatchEndpoint(videoId = item.id)))
+                                is EpisodeItem -> TvPlayback.playYtItem(tvContext, playerConnection, navigator, item)
                                 is PodcastItem -> item.id?.let { navigator.navigate(TvDestination.Playlist(it)) }
                                 else -> {}
                             }
@@ -1618,7 +1622,7 @@ fun TvHomeScreen(
                     onYTItemClick = { item: YTItem ->
                         when (item) {
                             is PlaylistItem -> navigator.navigate(TvDestination.Playlist(item.id))
-                            is SongItem -> playerConnection?.playQueue(YouTubeQueue(WatchEndpoint(videoId = item.id)))
+                            is SongItem -> TvPlayback.playVideoOrSong(tvContext, playerConnection, navigator, item)
                             else -> {}
                         }
                     },
@@ -2017,6 +2021,10 @@ fun TvLibraryScreen(
     focusRequester: FocusRequester? = null,
     onNavigateUp: (() -> Unit)? = null,
 ) {
+    val navigator = LocalTvNavigator.current
+    // Needed to hand a video to the video pipeline, which takes a context. Named
+    // apart from `context`, which is the navigator's own function on this screen.
+    val tvContext = LocalContext.current
     val songsViewModel: LibrarySongsViewModel = hiltViewModel()
     val artistsViewModel: LibraryArtistsViewModel = hiltViewModel()
     val albumsViewModel: LibraryAlbumsViewModel = hiltViewModel()
@@ -2122,7 +2130,7 @@ fun TvLibraryScreen(
                 SongRow(
                     title = "Liked songs",
                     songs = songs,
-                    onSongClick = { song: Song -> playerConnection?.playSong(song) },
+                    onSongClick = { song: Song -> TvPlayback.playLibrarySong(tvContext, playerConnection, navigator, song) },
                     modifier = Modifier.onFocusChanged { state -> if (state.hasFocus) focusedItemIndex = 1 },
                     onItemFocused = { focusedLibraryItem = it },
                 )
@@ -2450,7 +2458,7 @@ fun TvSearchScreen(
                 items(localSongs, key = { "local_song_${it.id}" }) { item ->
                     TvSearchResultItem(
                         item = item,
-                        onClick = { saveQueryToHistory(); handleSearchItemClick(item, playerConnection, navigator) },
+                        onClick = { saveQueryToHistory(); handleSearchItemClick(context, item, playerConnection, navigator) },
                         modifier = Modifier.onFocusChanged { state -> if (state.hasFocus) focusedItemIndex = 2 }
                     )
                 }
@@ -2469,7 +2477,7 @@ fun TvSearchScreen(
                 items(localArtists, key = { "artist_${it.id}" }) { item ->
                     TvSearchResultItem(
                         item = item,
-                        onClick = { saveQueryToHistory(); handleSearchItemClick(item, playerConnection, navigator) },
+                        onClick = { saveQueryToHistory(); handleSearchItemClick(context, item, playerConnection, navigator) },
                         modifier = Modifier.onFocusChanged { state -> if (state.hasFocus) focusedItemIndex = sectionIndex + 1 }
                     )
                 }
@@ -2488,7 +2496,7 @@ fun TvSearchScreen(
                 items(localAlbums, key = { "album_${it.id}" }) { item ->
                     TvSearchResultItem(
                         item = item,
-                        onClick = { saveQueryToHistory(); handleSearchItemClick(item, playerConnection, navigator) },
+                        onClick = { saveQueryToHistory(); handleSearchItemClick(context, item, playerConnection, navigator) },
                         modifier = Modifier.onFocusChanged { state -> if (state.hasFocus) focusedItemIndex = 2 }
                     )
                 }
@@ -2507,7 +2515,7 @@ fun TvSearchScreen(
                 items(localPlaylists, key = { "playlist_${it.id}" }) { item ->
                     TvSearchResultItem(
                         item = item,
-                        onClick = { saveQueryToHistory(); handleSearchItemClick(item, playerConnection, navigator) },
+                        onClick = { saveQueryToHistory(); handleSearchItemClick(context, item, playerConnection, navigator) },
                         modifier = Modifier.onFocusChanged { state -> if (state.hasFocus) focusedItemIndex = 2 }
                     )
                 }
@@ -2894,9 +2902,14 @@ fun TvYTSearchResultItem(item: YTItem, onClick: () -> Unit, modifier: Modifier =
     }
 }
 
-fun handleSearchItemClick(item: LocalItem, playerConnection: PlayerConnection?, navigator: TvNavigator) {
+fun handleSearchItemClick(
+    context: Context,
+    item: LocalItem,
+    playerConnection: PlayerConnection?,
+    navigator: TvNavigator,
+) {
     when (item) {
-        is Song -> playerConnection?.playSong(item)
+        is Song -> TvPlayback.playLibrarySong(context, playerConnection, navigator, item)
         is Album -> navigator.navigate(TvDestination.Album(item.id))
         is Artist -> navigator.navigate(TvDestination.Artist(item.id))
         is Playlist -> navigator.navigate(TvDestination.Playlist(item.id))
