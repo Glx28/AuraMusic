@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
@@ -395,6 +396,26 @@ object VideoPlaybackManager {
      * application context; use [activityRef] for anything needing an Activity.
      */
     private var currentContext: Context? = null
+
+    /**
+     * Whether this is a television.
+     *
+     * Asked of the device rather than the build, so one answer covers every place
+     * where the two behave differently. Resolved from whichever context is in hand at
+     * the time and then remembered - a device does not change its mind about what it
+     * is, and the answer is needed on paths that run before any context exists.
+     */
+    private var isTelevision: Boolean? = null
+    private fun isTelevision(context: Context?): Boolean {
+        isTelevision?.let { return it }
+        val answer = (context ?: com.auramusic.app.utils.AuraPlayerUtils.currentContextForDownloads)
+            ?.packageManager
+            ?.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+            ?: false
+        isTelevision = answer
+        return answer
+    }
+
     /**
      * Weak Activity handle, only needed to flip the requested orientation for
      * fullscreen. Weak so a configuration change can collect the old Activity.
@@ -919,6 +940,14 @@ object VideoPlaybackManager {
         val state = _uiState.value
         if (!state.autoplayEnabled) return
         val currentId = state.session?.videoId ?: return
+
+        // A television keeps its own queue, and the music service advances it. This
+        // lookahead appends the next video to the player's playlist so the end of one
+        // is a native advance - which on a television is a second, independent way of
+        // moving forward. Two of them means one press of next crosses two videos, and
+        // the video that flickers into place is the one being stepped over. So on a
+        // television the playlist is left to the one owner it has.
+        if (isTelevision(currentContext)) return
         // Everything in the queue has been played - the page this video was recommended
         // from is finite, and the ones in front of it have all been watched. Rather than
         // let the session stop dead, the recommendations are topped up from what has
@@ -2474,8 +2503,7 @@ object VideoPlaybackManager {
 
 private const val MAX_VIDEO_HISTORY_ENTRIES = 100
 
-/**
- * How many played videos the queue remembers.
+/** How many played videos the queue remembers.
  *
  * Enough that a session cannot come round to the same recommendations twice over,
  * bounded so a long evening of videos does not grow a set without end.

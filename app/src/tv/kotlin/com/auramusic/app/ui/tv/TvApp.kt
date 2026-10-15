@@ -259,7 +259,12 @@ enum class TvSection(val label: String) {
      val isPlayingState = playerConnection?.isPlaying?.collectAsState() ?: remember { mutableStateOf(false) }
      val currentSong by playerConnection?.currentSong?.collectAsState(null) ?: remember { mutableStateOf(null) }
      val currentMediaMetadata by playerConnection?.mediaMetadata?.collectAsState(null) ?: remember { mutableStateOf(null) }
-     val showMiniPlayer = currentSong != null || currentMediaMetadata != null
+     // A video is not a song and arrives without either of them, so without this
+    // the bar went silent for exactly the thing the listener just started.
+    val guestVideoPlaying by playerConnection?.guestVideoActive?.collectAsState(false)
+        ?: remember { mutableStateOf(false) }
+    val showMiniPlayer = currentSong != null || currentMediaMetadata != null ||
+        guestVideoPlaying == true
      var showExitDialog by remember { mutableStateOf(false) }
     // When the player screen is fullscreen the top bar is hidden entirely so
     // video/lyrics reach every edge of the display.

@@ -135,8 +135,9 @@ import kotlinx.coroutines.withContext
  private const val FULLSCREEN_LYRICS_SLOT = 5
  private const val FULLSCREEN_QUEUE_SLOT = 6
  private const val FULLSCREEN_QUALITY_SLOT = 7
- private const val FULLSCREEN_EXIT_SLOT = 8
- private const val FULLSCREEN_TRANSPORT_SLOTS = 9
+ private const val FULLSCREEN_SUBTITLES_SLOT = 8
+ private const val FULLSCREEN_EXIT_SLOT = 9
+ private const val FULLSCREEN_TRANSPORT_SLOTS = 10
 
  @Composable
  private fun TvPlayerControlButton(
@@ -315,6 +316,84 @@ private val QUALITY_OPTIONS = listOf(
     VideoQuality.QUALITY_480P,
     VideoQuality.QUALITY_360P,
 )
+
+/** One subtitle track, or turning them off: a row the remote can land on and press. */
+@Composable
+private fun TvSubtitleOption(
+    label: String,
+    detail: String?,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    focusRequester: FocusRequester? = null,
+    onFocused: () -> Unit = {},
+) {
+    val isFocused = remember { mutableStateOf(false) }
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val bringIntoViewScope = rememberCoroutineScope()
+    val borderColor = when {
+        isFocused.value -> MaterialTheme.colorScheme.primary
+        isSelected -> MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+        else -> Color.Transparent
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .border(2.dp, borderColor, RoundedCornerShape(10.dp))
+            .background(
+                if (isFocused.value) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+                } else if (isSelected) {
+                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                } else {
+                    MaterialTheme.colorScheme.surface.copy(alpha = 0.3f)
+                },
+            )
+            .bringIntoViewRequester(bringIntoViewRequester)
+            .onFocusChanged {
+                isFocused.value = it.isFocused
+                if (it.isFocused) {
+                    bringIntoViewScope.launch {
+                        runCatching { bringIntoViewRequester.bringIntoView() }
+                    }
+                    onFocused()
+                }
+            }
+            .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
+            .focusable()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                color = if (isSelected || isFocused.value) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+            )
+            detail?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (isSelected) {
+            Icon(
+                painter = painterResource(R.drawable.check),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(22.dp),
+            )
+        }
+    }
+}
 
 /** One resolution in the quality panel: a row the remote can land on and press. */
 @Composable
@@ -509,10 +588,12 @@ fun TvPlayerScreen(
     // open and dropping straight out of fullscreen throws away the way out.
     var fullscreenQueueOpen by remember { mutableStateOf(false) }
     var videoQualityPanelOpen by remember { mutableStateOf(false) }
+    var subtitlePanelOpen by remember { mutableStateOf(false) }
     BackHandler {
         when {
             fullscreenQueueOpen -> fullscreenQueueOpen = false
             videoQualityPanelOpen -> videoQualityPanelOpen = false
+            subtitlePanelOpen -> subtitlePanelOpen = false
             isFullScreen -> onFullScreenChange(false)
             else -> onBackClick()
         }
@@ -523,6 +604,7 @@ fun TvPlayerScreen(
         if (!isFullScreen) {
             fullscreenQueueOpen = false
             videoQualityPanelOpen = false
+            subtitlePanelOpen = false
         }
     }
     var duration by remember { mutableStateOf(0L) }
@@ -571,6 +653,9 @@ fun TvPlayerScreen(
         queueItemFocusers.getOrPut(mediaId) { FocusRequester() }
     val qualityOptionFocusers = remember { mutableStateMapOf<String, FocusRequester>() }
     val qualityCloseFocus = remember { FocusRequester() }
+    val subtitleFocusers = remember { mutableStateMapOf<Int, FocusRequester>() }
+    val subtitleOffFocus = remember { FocusRequester() }
+    val subtitleCloseFocus = remember { FocusRequester() }
     // Which button the remote is on. Kept as state rather than read off focus so the
     // row can move focus without racing the focus system's own bookkeeping.
     var focusedTransport by remember { mutableStateOf(FULLSCREEN_PLAY_SLOT) }
@@ -612,6 +697,12 @@ fun TvPlayerScreen(
     // Both are a picture on screen, so both are drawn the same way.
     val guestVideoActive by effectivePlayerConnection?.guestVideoActive?.collectAsState(false) ?: remember { mutableStateOf(false) }
     val showVideo = videoModeEnabled || guestVideoActive
+    // Subtitles are offered by the same service that offers them on the phone, so
+    // what is listed here is what is listed there and choosing one does the same.
+    val availableSubtitles by effectivePlayerConnection?.availableSubtitles
+        ?.collectAsState(emptyList()) ?: remember { mutableStateOf(emptyList()) }
+    val selectedSubtitleIndex by effectivePlayerConnection?.selectedSubtitleIndex
+        ?.collectAsState(-1) ?: remember { mutableStateOf(-1) }
     val isVideoAvailable by effectivePlayerConnection?.isVideoAvailable?.collectAsState(false) ?: remember { mutableStateOf(false) }
     val isVideoSwitching by effectivePlayerConnection?.isVideoSwitching?.collectAsState(false) ?: remember { mutableStateOf(false) }
     val playbackState by effectivePlayerConnection?.playbackState?.collectAsState(androidx.media3.common.Player.STATE_IDLE)
@@ -661,6 +752,9 @@ fun TvPlayerScreen(
             // "what plays next", and both open over the media.
             add(FULLSCREEN_QUEUE_SLOT)
             add(FULLSCREEN_QUALITY_SLOT)
+            // Only while there is something to turn on: a subtitles button that
+            // opens onto an empty list is a button that does nothing.
+            if (availableSubtitles.isNotEmpty()) add(FULLSCREEN_SUBTITLES_SLOT)
             add(FULLSCREEN_EXIT_SLOT)
         }
     }
@@ -681,6 +775,16 @@ fun TvPlayerScreen(
         focusInQueue = false
         wakeControls()
         runCatching { transportFocus[slot].requestFocus() }
+    }
+
+    // Opening the subtitle panel lands on the track in use, or on "Off" when the
+    // video is playing without one - the state a reader is most likely to be leaving.
+    LaunchedEffect(subtitlePanelOpen, selectedSubtitleIndex) {
+        if (!subtitlePanelOpen) return@LaunchedEffect
+        wakeControls()
+        delay(150)
+        val requester = subtitleFocusers[selectedSubtitleIndex] ?: subtitleOffFocus
+        runCatching { requester.requestFocus() }
     }
 
     // Opening the panel puts the remote on the resolution in use, so left and right
@@ -1461,6 +1565,7 @@ fun TvPlayerScreen(
                                         // panel: it is a short list of choices and
                                         // nothing behind it is worth reaching for.
                                         videoQualityPanelOpen -> true
+                                        subtitlePanelOpen -> true
 
                                         // The queue is not: it is open over the media,
                                         // and the transport controls are still there
@@ -1793,6 +1898,31 @@ fun TvPlayerScreen(
                                     wakeTransport()
                                 },
                             )
+                            // Subtitles, offered only when this video has any: a
+                            // button that opens onto an empty list does nothing at all,
+                            // and a reader cannot tell that from a missing button.
+                            if (availableSubtitles.isNotEmpty()) {
+                                TvPlayerControlButton(
+                                    onClick = {
+                                        subtitlePanelOpen = !subtitlePanelOpen
+                                        if (!subtitlePanelOpen) {
+                                            focusTransportSlot(FULLSCREEN_SUBTITLES_SLOT)
+                                        }
+                                    },
+                                    painter = painterResource(R.drawable.ic_subtitles),
+                                    contentDescription = "Subtitles",
+                                    tint = if (selectedSubtitleIndex >= 0) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        Color.White.copy(alpha = 0.7f)
+                                    },
+                                    focusRequester = transportFocus[FULLSCREEN_SUBTITLES_SLOT],
+                                    onFocused = {
+                                        focusedTransport = FULLSCREEN_SUBTITLES_SLOT
+                                        wakeTransport()
+                                    },
+                                )
+                            }
                             TvPlayerControlButton(
                                 onClick = { onFullScreenChange(false) },
                                 painter = painterResource(R.drawable.fullscreen_exit),
@@ -1911,6 +2041,95 @@ fun TvPlayerScreen(
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (subtitlePanelOpen) {
+                // The same list the phone offers, from the same service, so the
+                // languages are the same and choosing one behaves identically.
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .width(420.dp)
+                        .zIndex(7f),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f),
+                    tonalElevation = 6.dp,
+                ) {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                                .padding(start = 20.dp, end = 12.dp, top = 14.dp, bottom = 14.dp),
+                        ) {
+                            Text(
+                                text = "Subtitles",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TvPlayerControlButton(
+                                onClick = {
+                                    subtitlePanelOpen = false
+                                    focusTransportSlot(FULLSCREEN_SUBTITLES_SLOT)
+                                },
+                                icon = Icons.Filled.Close,
+                                contentDescription = "Close subtitles",
+                                size = 48.dp,
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                focusRequester = subtitleCloseFocus,
+                                onFocused = { wakeControls() },
+                            )
+                        }
+
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            item {
+                                TvSubtitleOption(
+                                    label = "Off",
+                                    detail = null,
+                                    isSelected = selectedSubtitleIndex < 0,
+                                    onClick = {
+                                        subtitlePanelOpen = false
+                                        pc?.selectSubtitle(-1)
+                                    },
+                                    focusRequester = subtitleOffFocus,
+                                    onFocused = { wakeControls() },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp),
+                                )
+                            }
+                            items(
+                                count = availableSubtitles.size,
+                                key = { "sub_${availableSubtitles[it].languageCode}" },
+                            ) { index ->
+                                val track = availableSubtitles[index]
+                                TvSubtitleOption(
+                                    label = track.languageCode.uppercase(),
+                                    detail = null,
+                                    isSelected = index == selectedSubtitleIndex,
+                                    onClick = {
+                                        subtitlePanelOpen = false
+                                        pc?.selectSubtitle(index)
+                                    },
+                                    focusRequester = subtitleFocusers.getOrPut(index) {
+                                        FocusRequester()
+                                    },
+                                    onFocused = { wakeControls() },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp),
+                                )
                             }
                         }
                     }

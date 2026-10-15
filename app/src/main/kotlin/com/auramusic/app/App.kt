@@ -91,6 +91,15 @@ class App : Application(), SingletonImageLoader.Factory {
         // context they need is set once here.
         com.auramusic.app.utils.AuraPlayerUtils.currentContextForDownloads = this
 
+        // Downloaded videos are only played from disk if the store knows they are
+        // there. It is read on whichever screen asked for the file, so anything
+        // played before that screen has been visited - which is every download once
+        // the app has been restarted - was resolved over the network instead, and a
+        // download on a plane is a download that cannot be had.
+        applicationScope.launch {
+            com.auramusic.app.video.VideoDownloadStore.load(this@App)
+        }
+
         // تهيئة إعدادات التطبيق عند الإقلاع
         applicationScope.launch {
             initializeSettings()
