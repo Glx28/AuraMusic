@@ -2453,7 +2453,12 @@ class MusicService :
             // observing the session sees the video, the music track's scrobble window
             // closes (the video's own timer is started by syncVideoIntegrations), and
             // the widget repaints with the incoming video's title.
-            currentMediaMetadata.value = mediaItem?.metadata
+            //
+            // Asked of the video session rather than of the media item, because a
+            // merged video-audio source is presented by a synthetic media item that
+            // carries no tag - so on any video above the merge threshold the item on
+            // its own described nothing at all.
+            currentMediaMetadata.value = guestVideoMetadata() ?: mediaItem?.metadata
             lastTransitionMediaId = mediaItem?.mediaId
             scrobbleManager?.onSongStop()
             updateWidgetUI(player.isPlaying)

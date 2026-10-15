@@ -5,6 +5,7 @@
 
 package com.auramusic.app.ui.tv
 
+import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -722,6 +723,11 @@ private fun TvDetailLayout(
     backdropAlbum: String? = null,
 ) {
     val backButtonFocus = focusRequester ?: remember { FocusRequester() }
+    // A video from one of these rows is handed to the video pipeline, which takes a
+    // context, and it has to be shown rather than merely begun. Both are read here so
+    // the row below does not have to know where they came from.
+    val songContext = LocalContext.current
+    val songNavigator = LocalTvNavigator.current
     // Tracks whether the back button currently holds focus. We only steal
     // the up-key to escape to the top nav bar when this is true – otherwise
     // we let Compose's normal focus traversal move focus between rows so
@@ -853,7 +859,7 @@ private fun TvDetailLayout(
         itemsIndexed(displaySongs, key = { index, displaySong -> "${index}_${displaySong.id}" }) { index, displaySong ->
             SongRowItem(
                 displaySong = displaySong,
-                onClick = { playerConnection?.playDisplaySong(displaySong) },
+                onClick = { playerConnection?.playDisplaySong(displaySong, songContext, songNavigator) },
             )
         }
 
@@ -952,23 +958,54 @@ private fun SongRowItem(displaySong: DisplaySong, onClick: () -> Unit, modifier:
     }
 }
 
-private fun PlayerConnection?.playDisplaySong(displaySong: DisplaySong) {
+private fun PlayerConnection?.playDisplaySong(
+    displaySong: DisplaySong,
+    context: Context,
+    navigator: TvNavigator?,
+) {
     if (this == null) return
     when (displaySong) {
         is DisplaySong.LocalSong -> {
-            playQueue(
-                ListQueue(
-                    title = displaySong.song.song.title,
-                    items = listOf(displaySong.song.toMediaItem()),
-                    startIndex = 0,
-                ),
-            )
+            // A video song in the library is the same video as any other, and it is
+            // the answer before playback starts rather than something discovered
+            // halfway through it.
+            if (displaySong.song.song.isVideo) {
+                TvPlayback.playVideo(
+                    context = context,
+                    navigator = navigator,
+                    videoId = displaySong.id,
+                    title = displaySong.title,
+                    channelName = displaySong.artists,
+                )
+            } else {
+                playQueue(
+                    ListQueue(
+                        title = displaySong.song.song.title,
+                        items = listOf(displaySong.song.toMediaItem()),
+                        startIndex = 0,
+                    ),
+                )
+            }
         }
         is DisplaySong.YouTubeSong -> {
-            // For YouTube songs, use YouTubeQueue
-            playQueue(com.auramusic.app.playback.queues.YouTubeQueue(
-                com.auramusic.innertube.models.WatchEndpoint(videoId = displaySong.songItem.id)
-            ))
+            // Decided in one place with every other shelf, which is what makes a
+            // video a video here as it is on the artist screen. This row is what the
+            // home shelves, playlists and search results all use, and it went
+            // straight to the music queue - so those were the surfaces where a video
+            // arrived as sound first and a picture afterwards, if at all.
+            if (TvPlayback.isVideo(displaySong.songItem)) {
+                TvPlayback.playVideo(
+                    context = context,
+                    navigator = navigator,
+                    videoId = displaySong.id,
+                    title = displaySong.title,
+                    channelName = displaySong.artists,
+                )
+            } else {
+                playQueue(com.auramusic.app.playback.queues.YouTubeQueue(
+                    com.auramusic.innertube.models.WatchEndpoint(videoId = displaySong.songItem.id)
+                ))
+            }
         }
     }
 }

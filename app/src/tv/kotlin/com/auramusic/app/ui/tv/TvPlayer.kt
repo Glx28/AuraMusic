@@ -196,6 +196,101 @@ import kotlinx.coroutines.withContext
      }
  }
 
+ /**
+  * One video in the queue, drawn the way a song is drawn in it.
+  *
+  * A video that comes next is not a timeline window - it has no window until it is
+  * chosen - so it is listed from the video's own list of what follows, which is the
+  * same list the next button moves through.
+  */
+ @Composable
+ private fun TvVideoQueueItem(
+     item: com.auramusic.app.video.VideoPlaybackManager.RecommendationItem,
+     isCurrent: Boolean,
+     onClick: () -> Unit,
+     modifier: Modifier = Modifier,
+     focusRequester: FocusRequester? = null,
+     onFocused: () -> Unit = {},
+ ) {
+     val isFocusedState = remember { mutableStateOf(false) }
+     val bringIntoViewRequester = remember { BringIntoViewRequester() }
+     val bringIntoViewScope = rememberCoroutineScope()
+     val borderColor = if (isFocusedState.value || isCurrent) {
+         MaterialTheme.colorScheme.primary
+     } else {
+         Color.Transparent
+     }
+     val backgroundColor = when {
+         isFocusedState.value -> MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
+         isCurrent -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+         else -> MaterialTheme.colorScheme.surface.copy(alpha = 0.3f)
+     }
+
+     Row(
+         verticalAlignment = Alignment.CenterVertically,
+         horizontalArrangement = Arrangement.spacedBy(16.dp),
+         modifier = modifier
+             .fillMaxWidth()
+             .clip(RoundedCornerShape(8.dp))
+             .border(2.dp, borderColor, RoundedCornerShape(8.dp))
+             .bringIntoViewRequester(bringIntoViewRequester)
+             .onFocusChanged {
+                 isFocusedState.value = it.isFocused
+                 if (it.isFocused) {
+                     bringIntoViewScope.launch {
+                         runCatching { bringIntoViewRequester.bringIntoView() }
+                     }
+                     onFocused()
+                 }
+             }
+             .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
+             .focusable()
+             .clickable(onClick = onClick)
+             .background(backgroundColor)
+             .padding(12.dp),
+     ) {
+         Box(
+             modifier = Modifier
+                 .size(56.dp)
+                 .clip(RoundedCornerShape(6.dp))
+                 .background(MaterialTheme.colorScheme.surfaceVariant),
+         ) {
+             AsyncImage(
+                 model = item.thumbnail,
+                 contentDescription = item.title,
+                 contentScale = ContentScale.Crop,
+                 modifier = Modifier.fillMaxSize(),
+             )
+         }
+         Column(modifier = Modifier.weight(1f)) {
+             Text(
+                 text = item.title,
+                 style = MaterialTheme.typography.bodyLarge,
+                 fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                 color = if (isCurrent) MaterialTheme.colorScheme.primary else Color.White,
+                 maxLines = 2,
+                 overflow = TextOverflow.Ellipsis,
+             )
+             if (item.channelName.isNotBlank()) {
+                 Text(
+                     text = item.channelName,
+                     style = MaterialTheme.typography.bodySmall,
+                     color = Color.White.copy(alpha = 0.7f),
+                     maxLines = 1,
+                     overflow = TextOverflow.Ellipsis,
+                 )
+             }
+         }
+         if (item.durationText != null) {
+             Text(
+                 text = item.durationText,
+                 style = MaterialTheme.typography.bodySmall,
+                 color = Color.White.copy(alpha = 0.7f),
+             )
+         }
+     }
+ }
+
   @Composable
   private fun TvQueueItem(
       window: Timeline.Window,
@@ -718,6 +813,16 @@ fun TvPlayerScreen(
     // Both are a picture on screen, so both are drawn the same way.
     val guestVideoActive by effectivePlayerConnection?.guestVideoActive?.collectAsState(false) ?: remember { mutableStateOf(false) }
     val showVideo = videoModeEnabled || guestVideoActive
+    // The videos that follow the one playing.
+    //
+    // A television's playlist holds only the video itself - the music service owns
+    // the queue and a video does not add a second one - so what comes next is kept
+    // by the video pipeline rather than by the player. This is the list the remote
+    // walks, which is what a queue is: without it a video ended and went nowhere,
+    // and next had nothing to move to.
+    val videoUiState by com.auramusic.app.video.VideoPlaybackManager.uiState.collectAsState()
+    val videoQueue = videoUiState.queue
+    val currentVideoId = videoUiState.session?.videoId
     // Subtitles are offered by the same service that offers them on the phone, so
     // what is listed here is what is listed there and choosing one does the same.
     val availableSubtitles by effectivePlayerConnection?.availableSubtitles
@@ -1508,26 +1613,47 @@ fun TvPlayerScreen(
                         contentPadding = PaddingValues(vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        items(
-                            count = queueWindows.size,
-                            key = { index -> "${queueWindows.getOrNull(index)?.mediaItem?.mediaId ?: "unknown"}_$index" }
-                        ) { index ->
-                            val window = queueWindows.getOrNull(index)
-                            val isCurrentSong = index == currentWindowIndex
-
-                            if (window != null) {
-                                TvQueueItem(
-                                    window = window,
-                                    isCurrentSong = isCurrentSong,
+                        if (guestVideoActive) {
+                            // While a video plays, the playlist holds that video and
+                            // nothing else, so the player's own windows would show a
+                            // list of one. What follows it is real and lives with the
+                            // videos, and that is what the remote should be walking.
+                            items(
+                                count = videoQueue.size,
+                                key = { index -> "video_${videoQueue[index].videoId}" },
+                            ) { index ->
+                                val upcoming = videoQueue[index]
+                                TvVideoQueueItem(
+                                    item = upcoming,
+                                    isCurrent = upcoming.videoId == currentVideoId,
                                     onClick = {
-                                        pc?.player?.seekTo(index, C.TIME_UNSET)
+                                        com.auramusic.app.video.VideoPlaybackManager.playFromQueue(upcoming)
                                     },
                                     modifier = Modifier.fillMaxWidth(),
                                 )
                             }
+                        } else {
+                            items(
+                                count = queueWindows.size,
+                                key = { index -> "${queueWindows.getOrNull(index)?.mediaItem?.mediaId ?: "unknown"}_$index" }
+                            ) { index ->
+                                val window = queueWindows.getOrNull(index)
+                                val isCurrentSong = index == currentWindowIndex
+
+                                if (window != null) {
+                                    TvQueueItem(
+                                        window = window,
+                                        isCurrentSong = isCurrentSong,
+                                        onClick = {
+                                            pc?.player?.seekTo(index, C.TIME_UNSET)
+                                        },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+                            }
                         }
 
-                        if (queueWindows.isEmpty()) {
+                        if (queueWindows.isEmpty() && !guestVideoActive) {
                             item {
                                 Box(
                                     modifier = Modifier
@@ -2044,25 +2170,21 @@ fun TvPlayerScreen(
                                     contentPadding = PaddingValues(vertical = 12.dp),
                                     verticalArrangement = Arrangement.spacedBy(10.dp),
                                 ) {
-                                    items(
-                                        count = queueWindows.size,
-                                        key = { index ->
-                                            "${queueWindows.getOrNull(index)?.mediaItem?.mediaId ?: "unknown"}_$index"
-                                        },
-                                    ) { index ->
-                                        val window = queueWindows.getOrNull(index)
-                                        val isCurrentSong = index == currentWindowIndex
-                                        if (window != null) {
-                                            val mediaId = window.mediaItem.mediaId
-                                            TvQueueItem(
-                                                window = window,
-                                                isCurrentSong = isCurrentSong,
+                                    if (guestVideoActive) {
+                                        items(
+                                            count = videoQueue.size,
+                                            key = { index -> "video_${videoQueue[index].videoId}" },
+                                        ) { index ->
+                                            val upcoming = videoQueue[index]
+                                            TvVideoQueueItem(
+                                                item = upcoming,
+                                                isCurrent = upcoming.videoId == currentVideoId,
                                                 onClick = {
                                                     fullscreenQueueOpen = false
-                                                    pc?.player?.seekTo(index, C.TIME_UNSET)
+                                                    com.auramusic.app.video.VideoPlaybackManager.playFromQueue(upcoming)
                                                     focusTransportSlot(FULLSCREEN_PLAY_SLOT)
                                                 },
-                                                focusRequester = queueFocuserFor(mediaId),
+                                                focusRequester = queueFocuserFor(upcoming.videoId),
                                                 onFocused = {
                                                     focusInQueue = true
                                                     wakeControls()
@@ -2072,9 +2194,39 @@ fun TvPlayerScreen(
                                                     .padding(horizontal = 12.dp),
                                             )
                                         }
+                                    } else {
+                                        items(
+                                            count = queueWindows.size,
+                                            key = { index ->
+                                                "${queueWindows.getOrNull(index)?.mediaItem?.mediaId ?: "unknown"}_$index"
+                                            },
+                                        ) { index ->
+                                            val window = queueWindows.getOrNull(index)
+                                            val isCurrentSong = index == currentWindowIndex
+                                            if (window != null) {
+                                                val mediaId = window.mediaItem.mediaId
+                                                TvQueueItem(
+                                                    window = window,
+                                                    isCurrentSong = isCurrentSong,
+                                                    onClick = {
+                                                        fullscreenQueueOpen = false
+                                                        pc?.player?.seekTo(index, C.TIME_UNSET)
+                                                        focusTransportSlot(FULLSCREEN_PLAY_SLOT)
+                                                    },
+                                                    focusRequester = queueFocuserFor(mediaId),
+                                                    onFocused = {
+                                                        focusInQueue = true
+                                                        wakeControls()
+                                                    },
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 12.dp),
+                                                )
+                                            }
+                                        }
                                     }
 
-                                    if (queueWindows.isEmpty()) {
+                                    if (queueWindows.isEmpty() && !guestVideoActive) {
                                         item {
                                             Box(
                                                 modifier = Modifier

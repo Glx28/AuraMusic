@@ -929,6 +929,36 @@ object VideoPlaybackManager {
     }
 
     /**
+     * Starts a specific video from the list of what comes next, keeping the rest of
+     * that list behind it.
+     *
+     * The list on a television is not the player's playlist - the playlist holds only
+     * the video that is playing, because a television has one owner of its queue - so
+     * choosing one from the queue is a deliberate start rather than a seek.
+     */
+    fun playFromQueue(item: RecommendationItem) {
+        val ctx = currentContext ?: return
+        if (item.videoId == _uiState.value.session?.videoId) {
+            // Already playing: going through the pipeline again would reload it from
+            // the start, which is the opposite of what picking it asked for.
+            player?.play()
+            return
+        }
+        _uiState.update {
+            it.copy(queue = rebuildQueue(listOf(item) + it.queue))
+        }
+        queuedAheadVideoId = null
+        playWithDetails(
+            context = ctx,
+            videoId = item.videoId,
+            title = item.title,
+            channelName = item.channelName,
+            channelId = item.channelId,
+            channelThumbnail = item.thumbnail,
+        )
+    }
+
+    /**
      * Whether this video has already been played this session.
      *
      * Shown on the Up next list so a video that has been watched reads as watched,
@@ -2473,12 +2503,33 @@ object VideoPlaybackManager {
                 channelThumbnail?.let { setArtworkUri(android.net.Uri.parse(it)) }
             }
             .build()
+
+        // The same declaration every other media item in the app makes, and the one
+        // the whole app reads back through [com.auramusic.app.extensions.metadata].
+        //
+        // A video that carried only the player-facing metadata above was, to
+        // everything that reads a media item's tag, an unnamed item - which is why a
+        // playing video reported "no song playing" in the player, left the top bar
+        // with nothing to draw, and had no details to show. The media source was
+        // right the whole time; nothing was ever asked what it was.
+        val appMetadata = com.auramusic.app.models.MediaMetadata(
+            id = videoId,
+            title = title.ifBlank { videoId },
+            artists = listOfNotNull(
+                channelName.takeIf { it.isNotBlank() }
+                    ?.let { com.auramusic.app.models.MediaMetadata.Artist(null, it) },
+            ),
+            duration = 0,
+            thumbnailUrl = channelThumbnail,
+        )
+
         return when (source) {
             is com.auramusic.auravideo.AuraVideo.VideoStreamSource.Single -> {
                 val mediaItem = MediaItem.Builder()
                     .setUri(source.url)
                     .setMimeType(source.mimeType)
                     .setMediaId(videoId)
+                    .setTag(appMetadata)
                     .setMediaMetadata(mediaMetadata)
                     .build()
                 factory.createMediaSource(mediaItem)
@@ -2488,6 +2539,7 @@ object VideoPlaybackManager {
                     .setUri(source.videoUrl)
                     .setMimeType(source.videoMimeType)
                     .setMediaId(videoId + "_v")
+                    .setTag(appMetadata)
                     .setMediaMetadata(mediaMetadata)
                     .build()
                 val videoSource = factory.createMediaSource(videoMediaItem)
@@ -2495,6 +2547,7 @@ object VideoPlaybackManager {
                     .setUri(source.audioUrl)
                     .setMimeType(source.audioMimeType)
                     .setMediaId(videoId + "_a")
+                    .setTag(appMetadata)
                     .setMediaMetadata(mediaMetadata)
                     .build()
                 val audioSource = factory.createMediaSource(audioMediaItem)
