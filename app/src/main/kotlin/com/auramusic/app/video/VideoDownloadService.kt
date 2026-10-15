@@ -65,6 +65,9 @@ class VideoDownloadService : android.app.Service() {
 
     private val client: OkHttpClient by lazy { httpClient(VideoBlockDownloader.DEFAULT_THREADS) }
 
+    /** The channel this service was told to announce itself on, decided by the caller. */
+    private var announcedChannel: String = CHANNEL_ID
+
     /**
      * A client with a connection pool to match how much is being fetched at once.
      *
@@ -112,6 +115,12 @@ class VideoDownloadService : android.app.Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
         val videoId = intent?.getStringExtra(EXTRA_VIDEO_ID).orEmpty()
+        // The channel was chosen - and proved to be one that can be posted on - before
+        // the service was started, so it is taken from the intent rather than worked
+        // out here. Asking the system anything on this path costs time the deadline
+        // does not give back.
+        announcedChannel = intent?.getStringExtra(EXTRA_CHANNEL)?.takeIf { it.isNotBlank() }
+            ?: CHANNEL_ID
 
         // A service started in the foreground has to be in the foreground within a few
         // seconds - and "a few" is measured from startForegroundService(), not from here.
@@ -416,7 +425,7 @@ class VideoDownloadService : android.app.Service() {
         request: VideoDownloadStore.Request?,
         videoId: String,
     ): Boolean {
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, announcedChannel)
             .setSmallIcon(R.drawable.download)
             .setContentTitle(
                 request?.title?.takeIf { it.isNotBlank() }
@@ -718,7 +727,12 @@ class VideoDownloadService : android.app.Service() {
         // What the download is, carried with the intent so that naming it never
         // costs the service any of the seconds it has to announce itself in.
         const val EXTRA_TITLE = "title"
+
+        /** The channel to announce on, proved postable by whoever started the service. */
         const val EXTRA_CHANNEL = "channel"
+
+        /** The name of the channel the video came from, which is text, not a channel id. */
+        const val EXTRA_CHANNEL_NAME = "channel_name"
         const val EXTRA_THUMBNAIL = "thumbnail"
         const val EXTRA_QUALITY = "quality"
         const val EXTRA_CODEC = "codec"
@@ -727,19 +741,19 @@ class VideoDownloadService : android.app.Service() {
         /**
      * Asks for a video. The record of what was asked for is written before this.
      *
-     * Everything the notification needs to name the download travels with the intent
-     * rather than being fetched afterwards. The service has a few seconds from this
-     * call to put a notification up, and reading it out of a store is work that could
-     * be slow, queued behind a dispatcher, or not finished yet - and a service that
-     * spends that window looking things up is a process the system kills, taking the
-     * download with it.
-         */
+     * Everything the notification needs travels with the intent rather than being
+     * fetched afterwards. The service has a few seconds from this call to put a
+     * notification up, and every step between here and there is time spent out of a
+     * budget that does not grow. The channel it will post on is settled here too, for
+     * the same reason - and because asking the system whether a channel works is slow
+     * enough to be worth doing before the clock rather than after it.
+     */
         fun start(context: Context, request: VideoDownloadStore.Request) {
             val intent = Intent(context, VideoDownloadService::class.java)
                 .setAction(ACTION_DOWNLOAD)
                 .putExtra(EXTRA_VIDEO_ID, request.videoId)
                 .putExtra(EXTRA_TITLE, request.title)
-                .putExtra(EXTRA_CHANNEL, request.channelName)
+                .putExtra(EXTRA_CHANNEL_NAME, request.channelName)
                 .putExtra(EXTRA_THUMBNAIL, request.thumbnailUrl)
                 .putExtra(EXTRA_QUALITY, request.quality.name)
                 .putExtra(EXTRA_CODEC, request.codec.name)
@@ -751,16 +765,69 @@ class VideoDownloadService : android.app.Service() {
             // startService instead - they have nothing to announce, and a service
             // started that way has to show something it would only take straight down.
             //
-            // The exception is a device where the app's notifications are turned off:
-            // there is nothing to foreground with, so asking to be a foreground service
-            // is asking to be killed. The transfer still happens, in the background, for
-            // as long as the system allows - and the button still counts it.
-            if (NotificationManagerCompat.from(context).areNotificationsEnabled()) {
+            // The channel is settled here rather than inside the service for two
+            // reasons, and the second is the one that matters: a channel the listener
+            // has turned off cannot carry a foreground notification, and the refusal
+            // arrives from outside the process where nothing can catch it. So there is
+            // nothing to ask here unless there is somewhere to ask it, and the answer
+            // travels with the rest of the details.
+            //
+            // When there is nowhere to post - notifications off for the app, or every
+            // channel turned off - the transfer is not started in the foreground at
+            // all. It still happens, in the background, for as long as the system
+            // allows, and the button still counts it.
+            val channel = usableChannelId(context)
+            if (channel != null) {
+                intent.putExtra(EXTRA_CHANNEL, channel)
                 intent.putExtra(EXTRA_REQUIRES_FOREGROUND, true)
                 ContextCompat.startForegroundService(context, intent)
             } else {
                 runCatching { context.startService(intent) }
             }
+        }
+
+        /**
+         * A channel this download can actually be announced on, or null when none will do.
+         *
+         * A foreground service whose notification the system will not accept is killed,
+         * and nothing the app does afterwards can prevent that: the refusal comes back
+         * from outside the process and takes the app down with it. The only way not to
+         * be killed by it is not to ask - so the channel is chosen and proved here,
+         * before the service is started, and the answer is handed over rather than
+         * looked up again on the far side of a deadline.
+         *
+         * A channel the listener has turned off stays turned off: creating it again does
+         * not undo that. So the announcement moves to a channel they have not seen.
+         */
+        fun usableChannelId(context: Context): String? {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return CHANNEL_ID
+            val manager = NotificationManagerCompat.from(context)
+            if (!manager.areNotificationsEnabled()) return null
+            listOf(CHANNEL_ID, FALLBACK_CHANNEL_ID).forEach { id ->
+                createChannel(context, id)
+                val channel = runCatching { manager.getNotificationChannel(id) }.getOrNull()
+                if (channel != null && channel.importance != NotificationManager.IMPORTANCE_NONE) {
+                    return id
+                }
+            }
+            return null
+        }
+
+        /** Creates [id] if it is not already there, and says so rather than failing loudly. */
+        private fun createChannel(context: Context, id: String) {
+            val manager = NotificationManagerCompat.from(context)
+            runCatching {
+                manager.createNotificationChannel(
+                    androidx.core.app.NotificationChannelCompat.Builder(
+                        id,
+                        androidx.core.app.NotificationManagerCompat.IMPORTANCE_LOW,
+                    )
+                        .setName(context.getString(R.string.downloading))
+                        .setDescription(context.getString(R.string.video_downloads))
+                        .setShowBadge(false)
+                        .build(),
+                )
+            }.onFailure { Timber.tag(TAG).w(it, "Channel %s could not be created", id) }
         }
 
         /** What the download was asked for, as it arrived with the intent. */
@@ -771,7 +838,7 @@ class VideoDownloadService : android.app.Service() {
             return VideoDownloadStore.Request(
                 videoId = videoId,
                 title = source.getStringExtra(EXTRA_TITLE).orEmpty(),
-                channelName = source.getStringExtra(EXTRA_CHANNEL).orEmpty(),
+                channelName = source.getStringExtra(EXTRA_CHANNEL_NAME).orEmpty(),
                 thumbnailUrl = source.getStringExtra(EXTRA_THUMBNAIL),
                 quality = VideoQuality.fromName(source.getStringExtra(EXTRA_QUALITY)),
                 codec = VideoCodec.fromName(source.getStringExtra(EXTRA_CODEC)),

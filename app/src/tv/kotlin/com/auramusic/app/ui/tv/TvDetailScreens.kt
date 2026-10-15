@@ -216,10 +216,9 @@ fun TvAlbumDetailScreen(albumId: String, playerConnection: PlayerConnection?, on
         showLikeButton = showAlbumLike,
         isLiked = isAlbumLiked,
         onLikeClick = onAlbumLikeClick,
-        // An album's canvas is looked up by the album and who made it; a playlist has
-        // neither, so it gets the artwork alone.
+        // Who made it, so the canvas is looked up by the same pair the phone asks in.
+        // The title is already this layout's own.
         backdropArtist = displaySubtitle,
-        backdropAlbum = displayTitle,
     )
 }
 
@@ -333,10 +332,11 @@ fun TvArtistDetailScreen(artistId: String, playerConnection: PlayerConnection?, 
     // put while the shelves scroll under it.
     Box(modifier = Modifier.fillMaxSize()) {
         TvCanvasBackdrop(
-            backdropTitle = displayTitle,
-            // An artist has no album to be looked up against, only themselves.
+            // An artist is looked up by who they are, not by a title of their own -
+            // the same shape the phone asks in, which is what makes the two agree on
+            // which canvas this is.
+            backdropTitle = null,
             backdropArtist = displayTitle,
-            backdropAlbum = null,
             imageUrl = displayThumbnail,
         )
 
@@ -659,10 +659,10 @@ fun TvArtistDetailScreen(artistId: String, playerConnection: PlayerConnection?, 
  */
 @Composable
 fun TvCanvasBackdrop(
-    backdropTitle: String,
+    backdropTitle: String? = null,
     backdropArtist: String?,
-    backdropAlbum: String?,
-    imageUrl: String?,
+    backdropAlbum: String? = null,
+    imageUrl: String? = null,
     modifier: Modifier = Modifier,
     /**
      * What is laid over the picture. The player and the detail screens both want this
@@ -673,10 +673,10 @@ fun TvCanvasBackdrop(
     scrimColor: Color? = null,
 ) {
     Box(modifier = modifier.fillMaxSize()) {
-        if (!imageUrl.isNullOrBlank() || backdropTitle.isNotBlank()) {
+        if (!imageUrl.isNullOrBlank() || !backdropTitle.isNullOrBlank() || !backdropArtist.isNullOrBlank()) {
             @UnstableApi
             AuraCanvasImage(
-                title = backdropTitle.ifBlank { null },
+                title = backdropTitle?.takeIf { it.isNotBlank() },
                 artist = backdropArtist?.ifBlank { null },
                 album = backdropAlbum?.ifBlank { null },
                 staticImageUrl = imageUrl,

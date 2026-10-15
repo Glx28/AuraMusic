@@ -892,7 +892,6 @@ fun TvPlayerScreen(
                 TvCanvasBackdrop(
                     backdropTitle = mediaMetadata?.title.orEmpty(),
                     backdropArtist = mediaMetadata?.artists?.joinToString(", ") { it.name },
-                    backdropAlbum = mediaMetadata?.album?.title,
                     imageUrl = mediaMetadata?.thumbnailUrl,
                     // Media is watched against black, not against the page colour.
                     scrimColor = Color.Black,
@@ -1468,17 +1467,20 @@ fun TvPlayerScreen(
                         },
                 ) {
                     // The same canvas as the split view, carried into fullscreen so
-                    // expanding the player does not throw the song's picture away. A
-                    // video covers it; lyrics and artwork are read against it. The
-                    // split view stands its own down for this one rather than playing
-                    // two canvases at once.
-                    TvCanvasBackdrop(
-                        backdropTitle = mediaMetadata?.title.orEmpty(),
-                        backdropArtist = mediaMetadata?.artists?.joinToString(", ") { it.name },
-                        backdropAlbum = mediaMetadata?.album?.title,
-                        imageUrl = mediaMetadata?.thumbnailUrl,
-                        scrimColor = Color.Black,
-                    )
+                    // expanding the player does not throw the song's picture away.
+                    // A video covers it completely, so it is not run at all then: a
+                    // canvas is a playing video in its own right, and decoding one
+                    // behind another is two decoders and a frame dropped for a
+                    // picture nobody can see. The split view stands its own down for
+                    // the same reason.
+                    if (!videoModeEnabled) {
+                        TvCanvasBackdrop(
+                            backdropTitle = mediaMetadata?.title.orEmpty(),
+                            backdropArtist = mediaMetadata?.artists?.joinToString(", ") { it.name },
+                            imageUrl = mediaMetadata?.thumbnailUrl,
+                            scrimColor = Color.Black,
+                        )
+                    }
 
                     when {
                         videoModeEnabled -> TvVideoView(
@@ -1553,14 +1555,11 @@ fun TvPlayerScreen(
                             }
                         }
 
-                        else -> mediaMetadata?.thumbnailUrl?.let { thumbnailUrl ->
-                            AsyncImage(
-                                model = thumbnailUrl,
-                                contentDescription = null,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize(),
-                            )
-                        }
+                        // No artwork drawn here on purpose. The backdrop already shows
+                        // the cover and fades the canvas in over it, so drawing the
+                        // thumbnail again at this size would simply cover the canvas
+                        // back up - which is exactly what it did: the canvas appeared
+                        // only once the lyrics replaced this branch.
                     }
 
                     // Scrim keeps the overlaid controls readable over bright video.

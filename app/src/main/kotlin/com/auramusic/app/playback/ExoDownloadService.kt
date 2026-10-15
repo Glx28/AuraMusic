@@ -38,6 +38,17 @@ class ExoDownloadService : DownloadService(
                 downloadManager.removeDownload(download.request.id)
             }
         }
+        // Started as a foreground service, this has to reach the foreground within
+        // seconds - and it cannot if there is nowhere to post a notification. A
+        // foreground service that cannot post is not left alone: the system kills the
+        // process for it, and the refusal comes from outside the process so nothing
+        // here could catch it. Standing down is the whole of the remedy - the
+        // downloads wait until notifications are switched back on.
+        DownloadNotifications.createIfMissing(this)
+        if (!DownloadNotifications.canPost(this)) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         return super.onStartCommand(intent, flags, startId)
     }
 
