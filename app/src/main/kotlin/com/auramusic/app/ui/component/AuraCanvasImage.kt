@@ -56,15 +56,28 @@ fun AuraCanvasImage(
     contentScale: ContentScale = ContentScale.Crop,
     album: String? = null,
     durationMs: Long? = null,
+    /**
+     * Resolve the canvas whatever the stored preference says.
+     *
+     * A backdrop that silently never appears reads as a screen that cannot do it,
+     * rather than as a setting that is off - and on a television there is nowhere to
+     * go and turn the setting on. The artwork underneath is still what is shown while
+     * this works out, or if nothing is ever found, so nothing is lost by trying.
+     */
+    alwaysEnabled: Boolean = false,
     @Suppress("UNUSED_PARAMETER") candidateTracks: List<String> = emptyList(),
 ) {
     val context = LocalContext.current
+    // Left exactly as it was: what a screen shows is the stored preference's business.
+    // A caller that means "always" says so with [alwaysEnabled] rather than this
+    // quietly changing for everyone.
     val (enabled, _) = rememberPreference(AuraCanvasEnabledKey, defaultValue = false)
+    val wanted = alwaysEnabled || enabled
     var canvasUrl by remember(title, artist, album, durationMs) { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(title, artist, album, durationMs, enabled) {
+    LaunchedEffect(title, artist, album, durationMs, wanted) {
         canvasUrl = null
-        if (!enabled) return@LaunchedEffect
+        if (!wanted) return@LaunchedEffect
         // Give the repository its context so resolved URLs survive a restart.
         AuraCanvasRepository.attachContext(context)
         val url = runCatching {

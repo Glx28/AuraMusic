@@ -562,12 +562,22 @@ fun TvPlayerScreen(
     // Which button the remote is on. Kept as state rather than read off focus so the
     // row can move focus without racing the focus system's own bookkeeping.
     var focusedTransport by remember { mutableStateOf(FULLSCREEN_PLAY_SLOT) }
+    // Whether the remote is inside the queue panel or back on the transport row. The
+    // panel is open over controls that still work, so left and right have to know
+    // which of the two they are leaving.
+    var focusInQueue by remember { mutableStateOf(false) }
     // Waking the overlay when a button takes focus: the remote has just proved the
     // listener is still watching, and controls that stay faded out are controls that
     // cannot be aimed at.
     fun wakeControls() {
         controlsVisible = true
         wakeTick++
+    }
+
+    /** Waking the overlay and noting that the remote is back on the transport row. */
+    fun wakeTransport() {
+        focusInQueue = false
+        wakeControls()
     }
 
     // Resolve player connection: prefer passed-in parameter, fall back to composition local.
@@ -651,6 +661,7 @@ fun TvPlayerScreen(
 
     fun focusTransportSlot(slot: Int) {
         focusedTransport = slot
+        focusInQueue = false
         wakeControls()
         runCatching { transportFocus[slot].requestFocus() }
     }
@@ -733,16 +744,27 @@ fun TvPlayerScreen(
         }
     }
 
+    /** Puts the remote on the row that is playing, so up and down walk from there. */
+    fun focusQueue() {
+        controlsVisible = true
+        wakeTick++
+        val playing = queueWindows.getOrNull(currentWindowIndex)?.mediaItem?.mediaId
+        val requester = playing?.let { queueItemFocusers[it] }
+            ?: queueWindows.firstOrNull()?.mediaItem?.mediaId?.let { queueItemFocusers[it] }
+            ?: queueCloseFocus
+        if (requester != null) runCatching { requester.requestFocus() }
+    }
+
     // Opening the queue hands the remote to it: the row that is playing takes focus
     // so up and down walk the list from a known place, rather than starting the
     // listener back at the top of a queue they cannot see.
     LaunchedEffect(fullscreenQueueOpen, currentWindowIndex) {
         if (!fullscreenQueueOpen) return@LaunchedEffect
+        // The controls stay on screen for as long as the panel is: a queue that hid
+        // the controls it was opened alongside made pausing it a two-press errand.
+        controlsVisible = true
         delay(150)
-        val playing = queueWindows.getOrNull(currentWindowIndex)?.mediaItem?.mediaId
-        val requester = playing?.let { queueItemFocusers[it] }
-            ?: queueWindows.firstOrNull()?.mediaItem?.mediaId?.let { queueItemFocusers[it] }
-        if (requester != null) runCatching { requester.requestFocus() }
+        focusQueue()
     }
 
     LaunchedEffect(Unit) {
@@ -1409,17 +1431,36 @@ fun TvPlayerScreen(
                             // reaches either end.
                             when (event.key) {
                                 Key.DirectionLeft, Key.DirectionRight -> {
-                                    // An open panel is its own place: left and right
-                                    // stay inside it rather than walking back to a row
-                                    // behind it. Centre is left alone so the row under
-                                    // the remote is the one that is pressed.
-                                    if (fullscreenQueueOpen || videoQualityPanelOpen) {
-                                        true
-                                    } else {
-                                        moveTransportFocus(
-                                            if (event.key == Key.DirectionLeft) -1 else 1,
-                                        )
-                                        true
+                                    val goingLeft = event.key == Key.DirectionLeft
+                                    when {
+                                        // The quality list is the only genuinely modal
+                                        // panel: it is a short list of choices and
+                                        // nothing behind it is worth reaching for.
+                                        videoQualityPanelOpen -> true
+
+                                        // The queue is not: it is open over the media,
+                                        // and the transport controls are still there
+                                        // underneath. Left walks back out of the list
+                                        // onto the row, and right walks into the list
+                                        // from it, so playback is never more than one
+                                        // press of the remote away.
+                                        fullscreenQueueOpen -> {
+                                            if (focusInQueue == goingLeft) {
+                                                if (goingLeft) {
+                                                    focusTransportSlot(focusedTransport)
+                                                } else {
+                                                    focusQueue()
+                                                }
+                                            } else {
+                                                moveTransportFocus(if (goingLeft) -1 else 1)
+                                            }
+                                            true
+                                        }
+
+                                        else -> {
+                                            moveTransportFocus(if (goingLeft) -1 else 1)
+                                            true
+                                        }
                                     }
                                 }
                                 else -> false
@@ -1454,6 +1495,25 @@ fun TvPlayerScreen(
                                 modifier = Modifier.fillMaxSize(),
                                 contentAlignment = Alignment.Center,
                             ) {
+                                // Words are read against a picture that is moving and
+                                // can be any colour at any moment, so the area they sit
+                                // in is darkened on its own account rather than trusting
+                                // the backdrop's scrim to be enough. Darkest in the middle
+                                // where the text is, lighter at the edges so the canvas is
+                                // still visible behind it.
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(
+                                            Brush.radialGradient(
+                                                colors = listOf(
+                                                    Color.Black.copy(alpha = 0.82f),
+                                                    Color.Black.copy(alpha = 0.5f),
+                                                ),
+                                                radius = 1400f,
+                                            ),
+                                        ),
+                                )
                                 when {
                                     lyrics == null -> {
                                         CircularProgressIndicator(
@@ -1520,6 +1580,10 @@ fun TvPlayerScreen(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .fillMaxWidth()
+                            // Above the queue panel: the panel is folded out over the
+                            // media, not over the controls, so they stay visible and
+                            // pressable while it is open.
+                            .zIndex(6f)
                             .graphicsLayer { alpha = controlsAlpha }
                             .padding(horizontal = 48.dp, vertical = 24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -1593,7 +1657,7 @@ fun TvPlayerScreen(
                                 focusRequester = transportFocus[FULLSCREEN_PREVIOUS_SLOT],
                                 onFocused = {
                                     focusedTransport = FULLSCREEN_PREVIOUS_SLOT
-                                    wakeControls()
+                                    wakeTransport()
                                 },
                             )
                             TvPlayerControlButton(
@@ -1606,7 +1670,7 @@ fun TvPlayerScreen(
                                 focusRequester = transportFocus[FULLSCREEN_REWIND_SLOT],
                                 onFocused = {
                                     focusedTransport = FULLSCREEN_REWIND_SLOT
-                                    wakeControls()
+                                    wakeTransport()
                                 },
                             )
                             TvPlayerControlButton(
@@ -1617,7 +1681,7 @@ fun TvPlayerScreen(
                                 focusRequester = transportFocus[FULLSCREEN_PLAY_SLOT],
                                 onFocused = {
                                     focusedTransport = FULLSCREEN_PLAY_SLOT
-                                    wakeControls()
+                                    wakeTransport()
                                 },
                             )
                             TvPlayerControlButton(
@@ -1631,7 +1695,7 @@ fun TvPlayerScreen(
                                 focusRequester = transportFocus[FULLSCREEN_FORWARD_SLOT],
                                 onFocused = {
                                     focusedTransport = FULLSCREEN_FORWARD_SLOT
-                                    wakeControls()
+                                    wakeTransport()
                                 },
                             )
                             TvPlayerControlButton(
@@ -1641,7 +1705,7 @@ fun TvPlayerScreen(
                                 focusRequester = transportFocus[FULLSCREEN_NEXT_SLOT],
                                 onFocused = {
                                     focusedTransport = FULLSCREEN_NEXT_SLOT
-                                    wakeControls()
+                                    wakeTransport()
                                 },
                             )
                             if (!videoModeEnabled) {
@@ -1679,7 +1743,7 @@ fun TvPlayerScreen(
                                 focusRequester = transportFocus[FULLSCREEN_QUEUE_SLOT],
                                 onFocused = {
                                     focusedTransport = FULLSCREEN_QUEUE_SLOT
-                                    wakeControls()
+                                    wakeTransport()
                                 },
                             )
                             // Resolution, for the same reason it exists on the phone: the
@@ -1702,7 +1766,7 @@ fun TvPlayerScreen(
                                 focusRequester = transportFocus[FULLSCREEN_QUALITY_SLOT],
                                 onFocused = {
                                     focusedTransport = FULLSCREEN_QUALITY_SLOT
-                                    wakeControls()
+                                    wakeTransport()
                                 },
                             )
                             TvPlayerControlButton(
@@ -1712,7 +1776,7 @@ fun TvPlayerScreen(
                                 focusRequester = transportFocus[FULLSCREEN_EXIT_SLOT],
                                 onFocused = {
                                     focusedTransport = FULLSCREEN_EXIT_SLOT
-                                    wakeControls()
+                                    wakeTransport()
                                 },
                             )
                         }
@@ -1763,7 +1827,10 @@ fun TvPlayerScreen(
                                         size = 48.dp,
                                         tint = MaterialTheme.colorScheme.onSurface,
                                         focusRequester = queueCloseFocus,
-                                        onFocused = { wakeControls() },
+                                        onFocused = {
+                                            focusInQueue = true
+                                            wakeControls()
+                                        },
                                     )
                                 }
 
@@ -1791,7 +1858,10 @@ fun TvPlayerScreen(
                                                     focusTransportSlot(FULLSCREEN_PLAY_SLOT)
                                                 },
                                                 focusRequester = queueFocuserFor(mediaId),
-                                                onFocused = { wakeControls() },
+                                                onFocused = {
+                                                    focusInQueue = true
+                                                    wakeControls()
+                                                },
                                                 modifier = Modifier
                                                     .fillMaxWidth()
                                                     .padding(horizontal = 12.dp),

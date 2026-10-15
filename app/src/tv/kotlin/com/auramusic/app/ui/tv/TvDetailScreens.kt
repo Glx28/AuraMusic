@@ -681,6 +681,9 @@ fun TvCanvasBackdrop(
                 album = backdropAlbum?.ifBlank { null },
                 staticImageUrl = imageUrl,
                 contentScale = ContentScale.Crop,
+                // Always on here: this is the screen's own artwork rather than a
+                // setting, and a television has nowhere to go and turn one on.
+                alwaysEnabled = true,
                 modifier = Modifier.fillMaxSize(),
             )
         }
