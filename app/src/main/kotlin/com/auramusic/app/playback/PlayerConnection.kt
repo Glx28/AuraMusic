@@ -219,6 +219,16 @@ import timber.log.Timber
     }
 
     val waitingForNetworkConnection = service.waitingForNetworkConnection
+
+    /**
+     * Whether a video, rather than music, is what the player is carrying.
+     *
+     * The same player serves both. A video put on it by the video screen plays as a
+     * video from its first frame rather than as an audio item that a video is later
+     * swapped in for, and this is what tells a player screen watching the shared
+     * player that there is a video to show.
+     */
+    val guestVideoActive = service.guestVideoActive
     
     // Callback to check if playback changes should be blocked (e.g., Listen Together guest)
     var shouldBlockPlaybackChanges: (() -> Boolean)? = null

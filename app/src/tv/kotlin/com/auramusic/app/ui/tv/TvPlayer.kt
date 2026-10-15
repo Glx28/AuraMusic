@@ -607,6 +607,11 @@ fun TvPlayerScreen(
         defaultValue = true,
     )
     val videoModeEnabled by effectivePlayerConnection?.videoModeEnabled?.collectAsState(false) ?: remember { mutableStateOf(false) }
+    // A video played from the video shelf is on this same player as a video from its
+    // first frame, rather than as an audio item something later swaps a video in for.
+    // Both are a picture on screen, so both are drawn the same way.
+    val guestVideoActive by effectivePlayerConnection?.guestVideoActive?.collectAsState(false) ?: remember { mutableStateOf(false) }
+    val showVideo = videoModeEnabled || guestVideoActive
     val isVideoAvailable by effectivePlayerConnection?.isVideoAvailable?.collectAsState(false) ?: remember { mutableStateOf(false) }
     val isVideoSwitching by effectivePlayerConnection?.isVideoSwitching?.collectAsState(false) ?: remember { mutableStateOf(false) }
     val playbackState by effectivePlayerConnection?.playbackState?.collectAsState(androidx.media3.common.Player.STATE_IDLE)
@@ -651,7 +656,7 @@ fun TvPlayerScreen(
             add(FULLSCREEN_PLAY_SLOT)
             add(FULLSCREEN_FORWARD_SLOT)
             add(FULLSCREEN_NEXT_SLOT)
-            if (!videoModeEnabled) add(FULLSCREEN_LYRICS_SLOT)
+            if (!showVideo) add(FULLSCREEN_LYRICS_SLOT)
             // Quality sits next to the queue: both are "how this plays" rather than
             // "what plays next", and both open over the media.
             add(FULLSCREEN_QUEUE_SLOT)
@@ -1001,7 +1006,7 @@ fun TvPlayerScreen(
                     } else {
                     // Video fills the available left panel; artwork keeps its thumbnail size.
                     Box(
-                        modifier = (if (videoModeEnabled) {
+                        modifier = (if (showVideo) {
                             Modifier.fillMaxWidth().weight(1f)
                         } else {
                             Modifier.size(artworkSize)
@@ -1010,10 +1015,10 @@ fun TvPlayerScreen(
                             .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.1f)),
                         contentAlignment = Alignment.Center,
                     ) {
-                        val isVideoBuffering = videoModeEnabled &&
+                        val isVideoBuffering = showVideo &&
                             playbackState == androidx.media3.common.Player.STATE_BUFFERING
 
-                        if (videoModeEnabled) {
+                        if (showVideo) {
                             TvVideoView(
                                 activePlayer = activePlayer,
                                 isVideoSwitching = isVideoSwitching,
@@ -1485,7 +1490,7 @@ fun TvPlayerScreen(
                     // behind another is two decoders and a frame dropped for a
                     // picture nobody can see. The split view stands its own down for
                     // the same reason.
-                    if (!videoModeEnabled) {
+                    if (!showVideo) {
                         TvCanvasBackdrop(
                             backdropTitle = mediaMetadata?.title.orEmpty(),
                             backdropArtist = mediaMetadata?.artists?.joinToString(", ") { it.name },
@@ -1495,7 +1500,7 @@ fun TvPlayerScreen(
                     }
 
                     when {
-                        videoModeEnabled -> TvVideoView(
+                        showVideo -> TvVideoView(
                             activePlayer = activePlayer,
                             isVideoSwitching = isVideoSwitching,
                             isBuffering = playbackState == androidx.media3.common.Player.STATE_BUFFERING,
@@ -1719,7 +1724,7 @@ fun TvPlayerScreen(
                                     wakeTransport()
                                 },
                             )
-                            if (!videoModeEnabled) {
+                            if (!showVideo) {
                                 TvPlayerControlButton(
                                     onClick = { onShowLyricsChange(!showLyrics) },
                                     icon = Icons.Filled.Lyrics,

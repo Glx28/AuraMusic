@@ -58,6 +58,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.media3.common.util.UnstableApi
 import androidx.compose.ui.res.stringResource
@@ -91,6 +92,7 @@ import com.auramusic.app.extensions.toMediaItem
 import com.auramusic.app.playback.PlayerConnection
 import com.auramusic.app.playback.queues.ListQueue
 import com.auramusic.app.ui.component.AuraCanvasImage
+import com.auramusic.app.video.VideoPlaybackManager
 import com.auramusic.app.viewmodels.LibraryAlbumsViewModel
 import com.auramusic.app.viewmodels.LibraryArtistsViewModel
 import com.auramusic.app.viewmodels.LibraryPlaylistsViewModel
@@ -291,14 +293,31 @@ fun TvArtistDetailScreen(artistId: String, playerConnection: PlayerConnection?, 
     val backButtonFocus = focusRequester ?: remember { FocusRequester() }
 
     // Click handler shared across all YouTube items
+    val videoContext = LocalContext.current
     val onYTClick: (com.auramusic.innertube.models.YTItem) -> Unit = { item ->
         when (item) {
             is SongItem -> {
-                playerConnection?.playQueue(
-                    com.auramusic.app.playback.queues.YouTubeQueue(
-                        com.auramusic.innertube.models.WatchEndpoint(videoId = item.id)
+                // A video is played as a video. Queued as music it starts as an audio
+                // item and something afterwards goes looking for a video to put in its
+                // place - a pause and a black screen every time, to arrive at the same
+                // picture it was always going to show. Handed to the video pipeline
+                // instead, the stream is resolved first and the picture is there from
+                // the first frame.
+                val isVideo = item.isVideoSong || item.album == null
+                if (isVideo) {
+                    VideoPlaybackManager.playWithDetails(
+                        context = videoContext,
+                        videoId = item.id,
+                        title = item.title,
+                        channelName = item.artists.joinToString(", ") { it.name },
                     )
-                )
+                } else {
+                    playerConnection?.playQueue(
+                        com.auramusic.app.playback.queues.YouTubeQueue(
+                            com.auramusic.innertube.models.WatchEndpoint(videoId = item.id)
+                        )
+                    )
+                }
             }
             is AlbumItem -> {
                 val browseId = item.browseId
