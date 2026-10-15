@@ -493,6 +493,18 @@ fun TvPlayerScreen(
     isFullScreen: Boolean,
     onFullScreenChange: (Boolean) -> Unit,
 ) {
+    // This screen is where a video is actually shown. While it is on screen a video
+    // switch waits for its first frame before resuming, so the picture and the sound
+    // arrive together; while it is not, there is nothing to render a frame onto and
+    // waiting for one would only be silence.
+    LaunchedEffect(playerConnection) {
+        playerConnection?.service?.setTvPlayerVisible(true)
+        try {
+            kotlinx.coroutines.awaitCancellation()
+        } finally {
+            playerConnection?.service?.setTvPlayerVisible(false)
+        }
+    }
     // The queue opened over the media is the first thing Back closes: leaving it
     // open and dropping straight out of fullscreen throws away the way out.
     var fullscreenQueueOpen by remember { mutableStateOf(false) }

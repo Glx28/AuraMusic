@@ -4330,11 +4330,39 @@ class MusicService :
     }
 
     /**
+     * Whether anything is showing this player's video on a television right now.
+     *
+     * A frame is only ever rendered onto a surface, so this is the difference between
+     * waiting for the picture and waiting for a picture nobody is displaying. On a
+     * television the answer is often no: music plays from the home screen, the video
+     * switch pauses playback, and a surface only exists once the player is opened.
+     */
+    @Volatile
+    private var tvPlayerVisible: Boolean = false
+
+    /** Called by the television's player screen while it is on screen. */
+    fun setTvPlayerVisible(visible: Boolean) {
+        tvPlayerVisible = visible
+    }
+
+    /**
      * On TV builds, once a video source has been injected and prepared, we wait
      * for its first frame to be rendered before resuming playback. This prevents
      * the "audio plays / black video" gap when starting the next video song.
      */
     private suspend fun waitForFirstVideoFrameThenResume(wasPlaying: Boolean) {
+        // Nothing renders a first frame when nothing is showing one. On a television
+        // the player is very often not on screen: it is paused the moment the switch
+        // begins, and a surface only exists once someone opens the player. Waiting
+        // for a frame that no surface can produce meant waiting for the timeout,
+        // which is ten seconds of silence on every song. What is being waited for
+        // here is the picture, and the picture is the optional part - the audio is
+        // what the listener came for.
+        if (isTvDevice && !tvPlayerVisible) {
+            Timber.d("waitForFirstVideoFrameThenResume: nothing is rendering frames, resuming now")
+            player.playWhenReady = wasPlaying
+            return
+        }
         val firstFrame = CompletableDeferred<Unit>()
         val listener = object : AnalyticsListener {
             override fun onRenderedFirstFrame(
@@ -4350,12 +4378,14 @@ class MusicService :
         videoFirstFrameListener = listener
         runCatching { player.addAnalyticsListener(listener) }
         try {
-            withTimeout(10_000L) {
+            // Bounded short: a surface that never renders is not worth ten seconds of
+            // silence to find out about.
+            withTimeout(3_000L) {
                 firstFrame.await()
             }
             Timber.d("waitForFirstVideoFrameThenResume: video first frame rendered, resuming playback")
         } catch (e: TimeoutCancellationException) {
-            Timber.w("waitForFirstVideoFrameThenResume: timed out waiting for first frame")
+            Timber.w("waitForFirstVideoFrameThenResume: no first frame, resuming anyway")
         } finally {
             runCatching { player.removeAnalyticsListener(listener) }
             if (videoFirstFrameListener === listener) {
