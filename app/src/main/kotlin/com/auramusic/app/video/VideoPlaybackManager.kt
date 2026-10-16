@@ -2065,7 +2065,6 @@ object VideoPlaybackManager {
                     channelThumbnail = session.channelThumbnail,
                     // The video already on the player has its own tracks attached; a
                     // fresh copy would drop them for the sake of a resolution change.
-                    subtitles = emptyList(),
                     startPositionMs = positionMs.coerceAtLeast(0L),
                 )
             }
@@ -2393,7 +2392,7 @@ object VideoPlaybackManager {
     /**
      * The one way a video reaches the player.
      *
-     * Resolve, fetch its subtitles, build the item, hand it over - and if any of that
+     * Resolve the stream, build the item, hand it over - and if any of that
      * cannot be done, say so. Every part of this used to be able to give up in
      * silence from four different places, and each one left the same thing behind: a
      * video with its details loaded, both ends of it at zero, nothing moving, and no
@@ -2414,6 +2413,21 @@ object VideoPlaybackManager {
         fun superseded() =
             generation != loadGeneration || _uiState.value.session?.videoId != videoId
 
+        val service = sharedConnectionRef?.get()?.service
+        if (service == null) {
+            failLoad("Playback is not available", videoId, generation)
+            return
+        }
+
+        // At the same time as nothing else, and waiting on nothing but itself.
+        //
+        // Captions used to sit in front of the picture here, and that is where the
+        // video stopped starting: they are fetched a track at a time, each a round
+        // trip, so every video waited behind a full caption download before a frame
+        // appeared - and a slow caption server looked exactly like a video that would
+        // not play. Loading a video now does the one thing it is for, and reaches the
+        // player as soon as the stream is there. Captions are a separate concern with
+        // their own pipeline, and that is where they belong.
         val source = withContext(Dispatchers.IO) {
             runCatching { AuraPlayerUtils.getVideoStreamSource(videoId).getOrNull() }.getOrNull()
         }
@@ -2423,26 +2437,12 @@ object VideoPlaybackManager {
             return
         }
 
-        val service = sharedConnectionRef?.get()?.service
-        if (service == null) {
-            failLoad("Playback is not available", videoId, generation)
-            return
-        }
-
-        // Fetched alongside the stream so the video carries its subtitles from the
-        // first frame. Built in rather than applied afterwards, because attaching them
-        // once they arrived meant replacing the item mid-load, which left a video
-        // loaded, silent and not moving.
-        val subtitles = runCatching { service.loadSubtitlesFor(videoId) }.getOrDefault(emptyList())
-        if (superseded()) return
-
         loadMediaSourceInto(
             videoId = videoId,
             source = source,
             title = title,
             channelName = channelName,
             channelThumbnail = channelThumbnail,
-            subtitles = subtitles,
             startPositionMs = startPositionMs,
         )
     }
@@ -2502,7 +2502,6 @@ object VideoPlaybackManager {
         title: String,
         channelName: String,
         channelThumbnail: String?,
-        subtitles: List<androidx.media3.common.MediaItem.SubtitleConfiguration> = emptyList(),
         startPositionMs: Long = 0L,
     ) {
         val service = sharedConnectionRef?.get()?.service ?: return
@@ -2517,7 +2516,6 @@ object VideoPlaybackManager {
             title = title,
             channelName = channelName,
             channelThumbnail = channelThumbnail,
-            subtitles = subtitles,
         )
         // The shared player swaps to the video as a guest: the music queue is snapshotted
         // on the first takeover and the session's notification shows the video's metadata.
@@ -2722,7 +2720,6 @@ object VideoPlaybackManager {
         title: String,
         channelName: String,
         channelThumbnail: String?,
-        subtitles: List<androidx.media3.common.MediaItem.SubtitleConfiguration> = emptyList(),
     ): androidx.media3.exoplayer.source.MediaSource {
         val factory = ProgressiveMediaSource.Factory(
             VideoPlayerSupport.createDataSourceFactory(context),
@@ -2772,7 +2769,6 @@ object VideoPlaybackManager {
                     .setMimeType(source.mimeType)
                     .setMediaId(videoId)
                     .setTag(appMetadata)
-                    .apply { if (subtitles.isNotEmpty()) setSubtitleConfigurations(subtitles) }
                     .setMediaMetadata(mediaMetadata)
                     .build()
                 factory.createMediaSource(mediaItem)
@@ -2783,7 +2779,6 @@ object VideoPlaybackManager {
                     .setMimeType(source.videoMimeType)
                     .setMediaId(videoId + "_v")
                     .setTag(appMetadata)
-                    .apply { if (subtitles.isNotEmpty()) setSubtitleConfigurations(subtitles) }
                     .setMediaMetadata(mediaMetadata)
                     .build()
                 val videoSource = factory.createMediaSource(videoMediaItem)
@@ -2809,6 +2804,7 @@ private const val MAX_VIDEO_HISTORY_ENTRIES = 100
  * bounded so a long evening of videos does not grow a set without end.
  */
 private const val MAX_REMEMBERED_PLAYED = 300
+
 
 /**
  * Channel avatars are served from these hosts. Used to tell an artwork URL that is

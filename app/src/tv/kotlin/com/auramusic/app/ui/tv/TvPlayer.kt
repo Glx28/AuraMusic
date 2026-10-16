@@ -583,6 +583,7 @@ private fun TvVideoView(
     activePlayer: androidx.media3.common.Player?,
     isVideoSwitching: Boolean,
     isBuffering: Boolean,
+    videoId: String? = null,
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -628,6 +629,20 @@ private fun TvVideoView(
                     playerView.onPause()
                 }
             },
+        )
+
+        // Captions, the way the phone draws them: an overlay on top of the picture,
+        // read from the app-wide preference, and never part of what is loaded.
+        //
+        // That last part is the whole of it. Carrying captions on the media item -
+        // which is what this was doing before - puts a round trip to a caption server
+        // in front of the picture, so a video waits on translations before it will
+        // appear. Drawn over the top, the video starts when its stream does and the
+        // words arrive whenever they arrive.
+        com.auramusic.app.video.VideoCaptionOverlay(
+            videoId = videoId,
+            player = activePlayer as? androidx.media3.exoplayer.ExoPlayer,
+            bottomPadding = 48.dp,
         )
 
         if (isVideoSwitching) {
@@ -751,7 +766,7 @@ fun TvPlayerScreen(
         queueItemFocusers.getOrPut(mediaId) { FocusRequester() }
     val qualityOptionFocusers = remember { mutableStateMapOf<String, FocusRequester>() }
     val qualityCloseFocus = remember { FocusRequester() }
-    val subtitleFocusers = remember { mutableStateMapOf<Int, FocusRequester>() }
+    val subtitleOnFocus = remember { FocusRequester() }
     val subtitleOffFocus = remember { FocusRequester() }
     val subtitleCloseFocus = remember { FocusRequester() }
     // Which button the remote is on. Kept as state rather than read off focus so the
@@ -844,10 +859,13 @@ fun TvPlayerScreen(
     }
     // Subtitles are offered by the same service that offers them on the phone, so
     // what is listed here is what is listed there and choosing one does the same.
-    val availableSubtitles by effectivePlayerConnection?.availableSubtitles
-        ?.collectAsState(emptyList()) ?: remember { mutableStateOf(emptyList()) }
-    val selectedSubtitleIndex by effectivePlayerConnection?.selectedSubtitleIndex
-        ?.collectAsState(-1) ?: remember { mutableStateOf(-1) }
+    // The same switch the caption overlay and the phone player read. Captions are
+    // drawn over the picture rather than carried on the media item, so there is no
+    // track list to be empty: the preference is the whole of what is on offer.
+    val (captionsOn, setCaptionsOn) = com.auramusic.app.utils.rememberPreference(
+        com.auramusic.app.constants.SubtitlesEnabledKey,
+        defaultValue = true,
+    )
     val isVideoAvailable by effectivePlayerConnection?.isVideoAvailable?.collectAsState(false) ?: remember { mutableStateOf(false) }
     val isVideoSwitching by effectivePlayerConnection?.isVideoSwitching?.collectAsState(false) ?: remember { mutableStateOf(false) }
     val playbackState by effectivePlayerConnection?.playbackState?.collectAsState(androidx.media3.common.Player.STATE_IDLE)
@@ -890,7 +908,7 @@ fun TvPlayerScreen(
     // meant a video that arrived as a video - which never turns video mode on at all -
     // left the row describing a layout that no longer existed, and the remote walked
     // onto a lyrics button that was no longer drawn and went nowhere.
-    val transportSlots = remember(showVideo, availableSubtitles.isNotEmpty()) {
+    val transportSlots = remember(showVideo) {
         buildList {
             add(FULLSCREEN_PREVIOUS_SLOT)
             add(FULLSCREEN_REWIND_SLOT)
@@ -902,9 +920,7 @@ fun TvPlayerScreen(
             // "what plays next", and both open over the media.
             add(FULLSCREEN_QUEUE_SLOT)
             add(FULLSCREEN_QUALITY_SLOT)
-            // Only while there is something to turn on: a subtitles button that
-            // opens onto an empty list is a button that does nothing.
-            if (availableSubtitles.isNotEmpty()) add(FULLSCREEN_SUBTITLES_SLOT)
+            add(FULLSCREEN_SUBTITLES_SLOT)
             add(FULLSCREEN_EXIT_SLOT)
         }
     }
@@ -945,12 +961,11 @@ fun TvPlayerScreen(
 
     // Opening the subtitle panel lands on the track in use, or on "Off" when the
     // video is playing without one - the state a reader is most likely to be leaving.
-    LaunchedEffect(subtitlePanelOpen, selectedSubtitleIndex) {
+    LaunchedEffect(subtitlePanelOpen, captionsOn) {
         if (!subtitlePanelOpen) return@LaunchedEffect
         wakeControls()
         delay(150)
-        val requester = subtitleFocusers[selectedSubtitleIndex] ?: subtitleOffFocus
-        runCatching { requester.requestFocus() }
+        runCatching { (if (captionsOn) subtitleOnFocus else subtitleOffFocus).requestFocus() }
     }
 
     // Opening the panel puts the remote on the resolution in use, so left and right
@@ -1310,6 +1325,7 @@ fun TvPlayerScreen(
                                 activePlayer = activePlayer,
                                 isVideoSwitching = isVideoSwitching,
                                 isBuffering = isVideoBuffering,
+                                videoId = videoUiState.session?.videoId,
                                 modifier = Modifier.fillMaxSize(),
                             )
                         } else if (showLyrics) {
@@ -1833,6 +1849,7 @@ fun TvPlayerScreen(
                     when {
                         showVideo -> TvVideoView(
                             activePlayer = activePlayer,
+                            videoId = videoUiState.session?.videoId,
                             isVideoSwitching = isVideoSwitching,
                             isBuffering = playbackState == androidx.media3.common.Player.STATE_BUFFERING,
                             modifier = Modifier.fillMaxSize(),
@@ -2116,10 +2133,10 @@ fun TvPlayerScreen(
                                     wakeTransport()
                                 },
                             )
-                            // Subtitles, offered only when this video has any: a
-                            // button that opens onto an empty list does nothing at all,
-                            // and a reader cannot tell that from a missing button.
-                            if (availableSubtitles.isNotEmpty()) {
+                            // Subtitles, meaning the same thing they mean on the
+                            // phone: captions drawn over the picture, switched by one
+                            // app-wide setting.
+                            run {
                                 TvPlayerControlButton(
                                     onClick = {
                                         subtitlePanelOpen = !subtitlePanelOpen
@@ -2129,7 +2146,7 @@ fun TvPlayerScreen(
                                     },
                                     painter = painterResource(R.drawable.ic_subtitles),
                                     contentDescription = "Subtitles",
-                                    tint = if (selectedSubtitleIndex >= 0) {
+                                    tint = if (captionsOn) {
                                         MaterialTheme.colorScheme.primary
                                     } else {
                                         Color.White.copy(alpha = 0.7f)
@@ -2332,49 +2349,40 @@ fun TvPlayerScreen(
                             )
                         }
 
-                        LazyColumn(
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(vertical = 12.dp),
+                        // Two answers, because there are two: captions on, or off.
+                        // Not a list of tracks to pick from - the caption overlay
+                        // draws the best track it has for the language already set, so
+                        // there is nothing here to choose between.
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            item {
-                                TvSubtitleOption(
-                                    label = "Off",
-                                    detail = null,
-                                    isSelected = selectedSubtitleIndex < 0,
-                                    onClick = {
-                                        subtitlePanelOpen = false
-                                        pc?.selectSubtitle(-1)
-                                    },
-                                    focusRequester = subtitleOffFocus,
-                                    onFocused = { wakeControls() },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 12.dp),
-                                )
-                            }
-                            items(
-                                count = availableSubtitles.size,
-                                key = { "sub_${availableSubtitles[it].languageCode}" },
-                            ) { index ->
-                                val track = availableSubtitles[index]
-                                TvSubtitleOption(
-                                    label = track.languageCode.uppercase(),
-                                    detail = null,
-                                    isSelected = index == selectedSubtitleIndex,
-                                    onClick = {
-                                        subtitlePanelOpen = false
-                                        pc?.selectSubtitle(index)
-                                    },
-                                    focusRequester = subtitleFocusers.getOrPut(index) {
-                                        FocusRequester()
-                                    },
-                                    onFocused = { wakeControls() },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 12.dp),
-                                )
-                            }
+                            TvSubtitleOption(
+                                label = "Captions on",
+                                detail = null,
+                                isSelected = captionsOn,
+                                onClick = {
+                                    subtitlePanelOpen = false
+                                    setCaptionsOn(true)
+                                },
+                                focusRequester = subtitleOnFocus,
+                                onFocused = { wakeControls() },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            TvSubtitleOption(
+                                label = "Captions off",
+                                detail = null,
+                                isSelected = !captionsOn,
+                                onClick = {
+                                    subtitlePanelOpen = false
+                                    setCaptionsOn(false)
+                                },
+                                focusRequester = subtitleOffFocus,
+                                onFocused = { wakeControls() },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
                         }
                     }
                 }
