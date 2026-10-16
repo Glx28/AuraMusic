@@ -1512,9 +1512,32 @@ object VideoPlaybackManager {
         // The lookahead keeps the next video queued on the shared playlist, so skipping is a
         // native advance with no reload gap. Only a drained queue falls back to a full load.
         val exo = player
-        if (exo != null && exo.hasNextMediaItem()) {
-            exo.seekToNextMediaItem()
+        val currentId = _uiState.value.session?.videoId
+
+        // Repeat one means repeat this. Asking the player for its "next" item under
+        // repeat one returns the item it is already playing, so skipping replayed the
+        // same video instead of moving on - which is what the listener had asked it
+        // to do. It is taken as the mode it is, not as a next item.
+        if (exo != null && exo.repeatMode == Player.REPEAT_MODE_ONE) {
+            exo.seekTo(0L)
+            exo.play()
             return
+        }
+
+        // Otherwise a queued item is only the next one if it is a *different* video.
+        // A merged video-audio source carries the video's id on both halves, so the
+        // comparison allows for that rather than reading its own halves as a change.
+        if (exo != null && currentId != null && exo.hasNextMediaItem()) {
+            val nextId = runCatching {
+                exo.getMediaItemAt(exo.currentMediaItemIndex + 1).mediaId
+            }.getOrNull()
+            val isAnotherVideo = nextId != null &&
+                nextId != currentId &&
+                !nextId.startsWith("${currentId}_")
+            if (isAnotherVideo) {
+                exo.seekToNextMediaItem()
+                return
+            }
         }
         val queue = _uiState.value.queue
         if (queue.isEmpty()) return
@@ -1532,6 +1555,15 @@ object VideoPlaybackManager {
 
     fun playPrevious() {
         val exo = player
+        // Under repeat one the previous item is the one already playing, so going
+        // there again is the same non-answer as it was for next: it read as the
+        // button doing nothing. Restarts the video instead, which is what going
+        // back from the start of a track has always meant everywhere else.
+        if (exo != null && exo.repeatMode == Player.REPEAT_MODE_ONE) {
+            exo.seekTo(0L)
+            exo.play()
+            return
+        }
         if (exo != null && exo.hasPreviousMediaItem()) {
             exo.seekToPreviousMediaItem()
             return
@@ -2286,6 +2318,12 @@ object VideoPlaybackManager {
         // The shared player swaps to the video as a guest: the music queue is snapshotted
         // on the first takeover and the session's notification shows the video's metadata.
         service.playGuestVideoSource(mediaSource, startPositionMs)
+        // Subtitles are the service's to fetch - it holds the track list, the
+        // preference and the cache - and it only used to fetch them on the way
+        // through a video-mode switch. A video played as a video never takes that
+        // way, so it was offered none at all: there was no button, because there
+        // was never a list behind it.
+        runCatching { service.loadSubtitlesFor(videoId) }
         // A fresh single-item playlist replaced whatever the lookahead had queued.
         queuedAheadVideoId = null
         queueUpcomingVideo()
@@ -2520,7 +2558,11 @@ object VideoPlaybackManager {
                     ?.let { com.auramusic.app.models.MediaMetadata.Artist(null, it) },
             ),
             duration = 0,
-            thumbnailUrl = channelThumbnail,
+            // The video's own picture. Only a channel avatar was on hand here, which
+            // is a profile shot rather than the thing being watched, so the video's
+            // own artwork stands in whenever there is one.
+            thumbnailUrl = channelThumbnail?.takeIf { !it.isChannelAvatarUrl() }
+                ?: VideoThumbnails.highQuality(videoId),
         )
 
         return when (source) {

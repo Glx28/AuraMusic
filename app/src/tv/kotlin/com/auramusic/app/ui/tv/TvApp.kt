@@ -378,15 +378,32 @@ enum class TvSection(val label: String) {
 
       // TV screensaver: show a dimmed now-playing overlay after a period of idle input.
       var isScreensaverActive by remember { mutableStateOf(false) }
+      // The dimming, which is the other half of going quiet: the screen is still
+      // there, just quieter, and any key brings it back. Separate from the
+      // screensaver because that one replaces what is on screen with what is
+      // playing, and this must not - whatever the listener was looking at is
+      // still what they left, a little further away.
+      var isDimmed by remember { mutableStateOf(false) }
       val lastInteraction = remember { mutableStateOf(System.currentTimeMillis()) }
       val idleTimeoutMs = 120_000L
+      // Short enough that dimming is the first thing a still room does, and well
+      // before the screensaver, which is what eventually takes over.
+      val dimIdleTimeoutMs = 60_000L
       val resetIdle: () -> Unit = {
           lastInteraction.value = System.currentTimeMillis()
           if (isScreensaverActive) isScreensaverActive = false
+          isDimmed = false
       }
        LaunchedEffect(Unit) {
           while (true) {
               delay(1000)
+              val idleFor = System.currentTimeMillis() - lastInteraction.value
+              // Whatever is on screen - a shelf, a video, lyrics, nothing playing
+              // at all - dims the same way. It is the room going quiet, not the
+              // music.
+              if (!isDimmed && !isScreensaverActive && idleFor > dimIdleTimeoutMs) {
+                  isDimmed = true
+              }
               val hasSong = currentSong != null || currentMediaMetadata != null
               val isVideoSong = currentMediaMetadata?.isVideoSong == true
               if (hasSong && !isVideoSong && !isScreensaverActive &&
@@ -446,6 +463,12 @@ enum class TvSection(val label: String) {
       // Handle keyboard shortcuts for TV remote
       val onPreviewKeyEvent: (androidx.compose.ui.input.key.KeyEvent) -> Boolean = { event ->
           if (event.type == KeyEventType.KeyDown) {
+              if (isDimmed) {
+                  // Any key at all lifts the dim, including one that goes nowhere
+                  // else: the point is that the listener moved, not that they moved
+                  // to something in particular.
+                  isDimmed = false
+              }
               if (isScreensaverActive) {
                   // Any key press dismisses the screensaver and resumes where the
                   // user left off (focus is preserved underneath the overlay).
@@ -699,6 +722,29 @@ enum class TvSection(val label: String) {
                           onDismiss = { isScreensaverActive = false },
                       )
                   }
+
+                  // The dim, over the whole app and over the screensaver as well.
+                  // Drawn last so nothing in the app sits on top of it, and given
+                  // no focus of its own so the key that lifts it reaches the root
+                  // handler rather than being swallowed here.
+                  androidx.compose.animation.AnimatedVisibility(
+                      visible = isDimmed,
+                      enter = androidx.compose.animation.fadeIn(
+                          animationSpec = androidx.compose.animation.core.tween(1200),
+                      ),
+                      exit = androidx.compose.animation.fadeOut(
+                          animationSpec = androidx.compose.animation.core.tween(250),
+                      ),
+                  ) {
+                      Box(
+                          modifier = Modifier
+                              .fillMaxSize()
+                              // Enough to take the glare off a room, not enough to
+                              // lose the screen: a shelf is still readable, a video
+                              // still visible, so this is a dimmer and not a blank.
+                              .background(Color.Black.copy(alpha = 0.62f)),
+                      )
+                  }
               }
          }
      }
@@ -927,8 +973,12 @@ fun TvTopBar(
 
              Spacer(modifier = Modifier.weight(1f))
 
-                // Mini player (compact to fit alongside nav buttons)
-                if (!compactTopBar && showMiniPlayer && (currentSong != null || currentMediaMetadata != null)) {
+                // Mini player (compact to fit alongside nav buttons).
+                // Whether anything is playing is decided by showMiniPlayer alone. It
+                // was also asked a second time here, and that second question knew
+                // only about songs - so a video, which is neither, was dismissed from
+                // the bar even though the caller had already decided it belonged.
+                if (!compactTopBar && showMiniPlayer) {
                     val miniTitle = currentSong?.title ?: currentMediaMetadata?.title.orEmpty()
                     val miniArtists = currentSong?.artists?.joinToString(", ") { it.name }
                         ?: currentMediaMetadata?.artists?.joinToString(", ") { it.name }.orEmpty()

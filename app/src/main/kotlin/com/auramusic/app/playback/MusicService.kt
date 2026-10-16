@@ -452,7 +452,10 @@ class MusicService :
                 ),
             ),
             duration = (durationMs / 1000).toInt(),
-            thumbnailUrl = session.channelThumbnail,
+            // The video's own picture. The channel avatar was used here, which is a
+            // round profile shot rather than the thing being watched - the same
+            // mistake that put avatars in Continue Watching and the Library shelves.
+            thumbnailUrl = session.videoThumbnail ?: session.channelThumbnail,
             liked = VideoPlaybackManager.uiState.value.isLiked,
         )
     }
@@ -1876,6 +1879,12 @@ class MusicService :
     val guestVideoActive: StateFlow<Boolean> = _guestVideoActive.asStateFlow()
 
     /**
+     * The repeat mode the listener had chosen before a video took the player, so it
+     * can be handed back when the video is over. Null while no video is on.
+     */
+    private var repeatBeforeGuestVideo: Int? = null
+
+    /**
      * Plays a video's media source on this player, replacing whatever the music queue held.
      * The music queue is snapshotted first so [endGuestVideo] can bring it back untouched.
      */
@@ -1889,6 +1898,19 @@ class MusicService :
             // wrong video's id, and let a playback error try to restore an audio item
             // that has nothing to do with this one.
             resetVideoMode()
+            // A playlist of one, repeated forever. Under repeat-all a video that
+            // reached its end was started again rather than moving on, so it never
+            // finished and never got to the next one. The mode is recorded and stood
+            // down for as long as the video is on the player, then handed back.
+            //
+            // Only on a television: it has one video on the player at a time, while a
+            // telephone appends the next video behind this one and so is never
+            // repeating a list of one. Repeat one is left alone - that is the listener
+            // asking for this video again.
+            repeatBeforeGuestVideo = player.repeatMode
+            if (isTvDevice && player.repeatMode == Player.REPEAT_MODE_ALL) {
+                player.repeatMode = Player.REPEAT_MODE_OFF
+            }
             if (queuePersistenceEnabled) saveQueueToDiskNow()
             _guestVideoActive.value = true
         }
@@ -1917,6 +1939,10 @@ class MusicService :
     fun endGuestVideo(restoreQueue: Boolean) {
         if (!_guestVideoActive.value) return
         _guestVideoActive.value = false
+        // The repeat mode the listener had chosen, back again now that something is
+        // playing that can honour it.
+        repeatBeforeGuestVideo?.let { player.repeatMode = it }
+        repeatBeforeGuestVideo = null
         if (restoreQueue) restorePersistedQueuePaused()
         // The video is gone: hand the widget, presence and scrobbler back to the music
         // path immediately instead of waiting for the debounced song update to emit.
@@ -4333,6 +4359,130 @@ class MusicService :
 
     fun selectSubtitle(index: Int) {
         _selectedSubtitleIndex.value = index
+        applySubtitleSelection(index)
+    }
+
+    /**
+     * Turns text tracks off on the player, without rebuilding anything.
+     *
+     * Choosing between several tracks leans on the default each track was attached
+     * with, which is the same thing the phone does; what this adds is that "Off"
+     * actually turns them off rather than only recording the choice.
+     */
+    private fun applySubtitleSelection(index: Int) {
+        runCatching {
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, index < 0)
+                .build()
+        }
+    }
+
+    /**
+     * Hands freshly fetched tracks to the video on the player.
+     *
+     * A video is built and started before its captions have been fetched, because
+     * waiting for them would put a network round trip between the listener and the
+     * picture. So when the tracks arrive the item is given them and prepared again,
+     * from the same position - which is why the button behind this list was never
+     * there: there was nothing on the item to select.
+     *
+     * Only for a video whose item holds a real source of its own. A merged
+     * video-audio item presents a placeholder that cannot be rebuilt, so it is left
+     * as it is rather than replaced with something that would not play.
+     */
+    private fun attachSubtitlesToCurrentVideo(configs: List<MediaItem.SubtitleConfiguration>) {
+        if (configs.isEmpty() || !_guestVideoActive.value) return
+        runCatching {
+            val index = player.currentMediaItemIndex
+            if (index < 0 || index >= player.mediaItemCount) return
+            val item = player.getMediaItemAt(index)
+            if (!item.localConfiguration?.subtitleConfigurations.isNullOrEmpty()) return
+            val uri = item.localConfiguration?.uri ?: return
+            if (uri.scheme == null || uri.scheme == "window") return
+            val position = player.currentPosition
+            val wasPlaying = player.playWhenReady
+            player.replaceMediaItem(index, item.buildUpon().setSubtitleConfigurations(configs).build())
+            player.prepare()
+            if (position > 0) player.seekTo(index, position)
+            player.playWhenReady = wasPlaying
+        }
+    }
+
+    /** The video whose subtitles were last asked for, so a late reply can be dropped. */
+    private var subtitleLoadVideoId: String? = null
+
+    /**
+     * Fetches a video's subtitle tracks, offers them, and selects the preferred one.
+     *
+     * Shared by the switch to video mode and by a video played as a video from the
+     * start. The latter never passes through the switch, and without this the player
+     * offered no subtitles at all for exactly the videos it shows as videos - there
+     * was no button, because there was never a list behind it.
+     */
+    fun loadSubtitlesFor(videoId: String) {
+        if (videoId.isBlank()) return
+        subtitleLoadVideoId = videoId
+        scope.launch {
+            try {
+                if (!dataStore.get(com.auramusic.app.constants.SubtitlesEnabledKey, true)) return@launch
+                val captionResult = withContext(Dispatchers.IO) {
+                    YouTube.getCaptionTracksWithDuration(videoId).getOrNull()
+                }
+                // The video may have moved on while its tracks were being fetched.
+                if (subtitleLoadVideoId != videoId) return@launch
+                val tracks = captionResult?.first.orEmpty()
+                val durationMs = captionResult?.second
+                if (tracks.isEmpty()) {
+                    _availableSubtitles.value = emptyList()
+                    _selectedSubtitleIndex.value = -1
+                    return@launch
+                }
+                val infos = mutableListOf<SubtitleInfo>()
+                val configs = mutableListOf<MediaItem.SubtitleConfiguration>()
+                for (track in tracks) {
+                    try {
+                        val text = withContext(Dispatchers.IO) {
+                            YouTube.fetchSubtitleFromCaptionTrack(track.baseUrl).getOrNull()
+                        }
+                        if (text.isNullOrBlank()) continue
+                        val vttText = YouTube.convertTimedTextToVttWithDuration(text, durationMs)
+                        val file = withContext(Dispatchers.IO) {
+                            File(cacheDir, "subtitle_${track.vssId}.vtt").apply { writeText(vttText) }
+                        }
+                        if (subtitleLoadVideoId != videoId) return@launch
+                        configs.add(
+                            MediaItem.SubtitleConfiguration.Builder(android.net.Uri.fromFile(file))
+                                .setMimeType(MimeTypes.TEXT_VTT)
+                                .setLanguage(track.languageCode)
+                                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                                .build(),
+                        )
+                        infos.add(
+                            SubtitleInfo(
+                                url = track.baseUrl,
+                                format = "vtt",
+                                language = java.util.Locale(track.languageCode).displayLanguage,
+                                languageCode = track.languageCode,
+                                isAutoGenerated = track.kind == "asr",
+                                cachedContent = vttText,
+                                cachedFilePath = file.absolutePath,
+                            ),
+                        )
+                    } catch (e: Exception) {
+                        Timber.e(e, "loadSubtitlesFor: failed to fetch one subtitle track")
+                    }
+                }
+                _availableSubtitles.value = infos.toList()
+                if (infos.isNotEmpty()) {
+                    attachSubtitlesToCurrentVideo(configs)
+                    val preferred = dataStore.get(com.auramusic.app.constants.SubtitleLanguageKey, "en")
+                    val index = infos.indexOfFirst { it.languageCode == preferred }
+                    selectSubtitle(if (index >= 0) index else 0)
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "loadSubtitlesFor: error fetching caption tracks")
+            }
+        }
     }
 
     private fun resetVideoMode() {

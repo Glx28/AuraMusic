@@ -821,8 +821,26 @@ fun TvPlayerScreen(
     // walks, which is what a queue is: without it a video ended and went nowhere,
     // and next had nothing to move to.
     val videoUiState by com.auramusic.app.video.VideoPlaybackManager.uiState.collectAsState()
-    val videoQueue = videoUiState.queue
     val currentVideoId = videoUiState.session?.videoId
+    // Starting one video from this list replaces it with another, and between the
+    // two the list is briefly rebuilt from the new video's own recommendations. The
+    // panel fell out of that gap and showed nothing, then came back - so it is given
+    // the video that is playing whenever the list cannot answer, and never empties
+    // while a video is.
+    val videoQueue = videoUiState.queue.ifEmpty {
+        videoUiState.session?.let { session ->
+            listOf(
+                com.auramusic.app.video.VideoPlaybackManager.RecommendationItem(
+                    videoId = session.videoId,
+                    title = session.title,
+                    channelName = session.channelName,
+                    channelId = session.channelId,
+                    thumbnail = session.videoThumbnail ?: session.channelThumbnail,
+                    durationText = null,
+                ),
+            )
+        }.orEmpty()
+    }
     // Subtitles are offered by the same service that offers them on the phone, so
     // what is listed here is what is listed there and choosing one does the same.
     val availableSubtitles by effectivePlayerConnection?.availableSubtitles
