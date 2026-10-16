@@ -1889,11 +1889,6 @@ class MusicService :
     fun currentGuestMetadata(): MediaMetadata? =
         if (_guestVideoActive.value) guestVideoMetadata() else null
 
-    /**
-     * The repeat mode the listener had chosen before a video took the player, so it
-     * can be handed back when the video is over. Null while no video is on.
-     */
-    private var repeatBeforeGuestVideo: Int? = null
 
     /**
      * Plays a video's media source on this player, replacing whatever the music queue held.
@@ -1909,19 +1904,6 @@ class MusicService :
             // wrong video's id, and let a playback error try to restore an audio item
             // that has nothing to do with this one.
             resetVideoMode()
-            // A playlist of one, repeated forever. Under repeat-all a video that
-            // reached its end was started again rather than moving on, so it never
-            // finished and never got to the next one. The mode is recorded and stood
-            // down for as long as the video is on the player, then handed back.
-            //
-            // Only on a television: it has one video on the player at a time, while a
-            // telephone appends the next video behind this one and so is never
-            // repeating a list of one. Repeat one is left alone - that is the listener
-            // asking for this video again.
-            repeatBeforeGuestVideo = player.repeatMode
-            if (isTvDevice && player.repeatMode == Player.REPEAT_MODE_ALL) {
-                player.repeatMode = Player.REPEAT_MODE_OFF
-            }
             if (queuePersistenceEnabled) saveQueueToDiskNow()
             _guestVideoActive.value = true
         }
@@ -1950,10 +1932,6 @@ class MusicService :
     fun endGuestVideo(restoreQueue: Boolean) {
         if (!_guestVideoActive.value) return
         _guestVideoActive.value = false
-        // The repeat mode the listener had chosen, back again now that something is
-        // playing that can honour it.
-        repeatBeforeGuestVideo?.let { player.repeatMode = it }
-        repeatBeforeGuestVideo = null
         if (restoreQueue) restorePersistedQueuePaused()
         // The video is gone: hand the widget, presence and scrobbler back to the music
         // path immediately instead of waiting for the debounced song update to emit.

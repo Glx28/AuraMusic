@@ -476,7 +476,11 @@ object VideoPlaybackManager {
                 }
                 return
             }
-            if (id in playedVideoIds) return
+            // Already watched, and still here. A music queue keeps what it has played -
+            // the song before this one does not vanish off the list when the next one
+            // starts, and the video queue asked to behave like a music queue was doing
+            // exactly that. What has been watched is kept out of what comes *next*,
+            // which is a separate question and is asked where it is asked.
             if (!seen.add(id)) return
             kept.add(item)
         }
@@ -556,21 +560,6 @@ object VideoPlaybackManager {
             _uiState.update { it.copy(isBuffering = false, error = error.message ?: "Playback error") }
         }
 
-        override fun onRepeatModeChanged(repeatMode: Int) {
-            if (!isGuestActive()) return
-            // A television's playlist is the one video that is playing, so repeat-all
-            // would loop it forever: the video reached its end, the player started it
-            // again, and it never got to the next one. The mode is stood back down
-            // wherever it is set from - the transport button, the settings, or the
-            // service - rather than only once, at the moment the video started, where
-            // anything set afterwards quietly undid it. Repeat-one is left alone: that
-            // is the listener asking for this video again.
-            val exo = player ?: return
-            if (repeatMode == Player.REPEAT_MODE_ALL && exo.mediaItemCount <= 1) {
-                exo.repeatMode = Player.REPEAT_MODE_OFF
-            }
-        }
-
         override fun onVideoSizeChanged(videoSize: VideoSize) {
             if (!isGuestActive()) return
             // The PiP window is sized from this, and a stale ratio makes the window letterbox
@@ -584,6 +573,24 @@ object VideoPlaybackManager {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             if (!isGuestActive()) return
             val exo = player ?: return
+
+            // Repeat-all wrapped the single video round to its own start, which is the
+            // end of it as far as the queue is concerned: there is nothing in a
+            // playlist of one to repeat along to. The mode itself is left exactly as
+            // the listener set it - it is the button that decides, not the queue - so
+            // the repeat button keeps behaving the way it does for music.
+            //
+            // Repeat-one is not this: that is the listener asking for this video again.
+            val sessionId = _uiState.value.session?.videoId
+            val wrapped = reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT &&
+                sessionId != null &&
+                mediaItem?.mediaId?.let { it == sessionId || it.startsWith("${sessionId}_") } == true
+            if (wrapped && exo.repeatMode == Player.REPEAT_MODE_ALL) {
+                markCurrentWatched()
+                if (_uiState.value.autoplayEnabled) playNext()
+                return
+            }
+
             // A merged audio+video source reports its video-only child's "<id>_v" id
             // (the merged timeline takes the first child's media item), so strip the
             // stream suffix before comparing against the session and queue. Without
@@ -1617,7 +1624,15 @@ object VideoPlaybackManager {
         }
         val queue = _uiState.value.queue
         if (queue.isEmpty()) return
-        val nextItem = queue.firstOrNull { it.videoId != _uiState.value.session?.videoId } ?: return
+        // From just after the one playing, then around. Not "anything that is not this
+        // one": the queue keeps what it has already played, so the first entry that
+        // merely differs from the current video is usually the one *behind* it - which
+        // is how pressing next went backwards, or nowhere at all.
+        val from = queue.indexOfFirst { it.videoId == currentId }
+        val nextItem = (
+            queue.drop(from + 1) + queue.take(maxOf(from, 0))
+            ).firstOrNull { it.videoId != currentId && it.videoId !in playedVideoIds }
+            ?: return
         val ctx = currentContext ?: return
         playWithDetails(
             context = ctx,
