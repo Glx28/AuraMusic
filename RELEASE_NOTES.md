@@ -97,9 +97,9 @@ Thank you to everyone who contributed to this release — including first-time c
 
 - **@chila254** (Franklin Finyange) — project lead
 - **@Mickael81** (Mickaël Binos)
-- **@Glx28**
+- **@Glx28** — [#23](https://github.com/TeamAuraMusic/AuraMusic/pull/23) (TV recommendation publishing and sign-in D-pad), [#24](https://github.com/TeamAuraMusic/AuraMusic/pull/24) (TV recommendation refreshes)
 - **@vityamolodets000-ctrl**
-- **@a8ec29b** — first-time contributor, Simplified Chinese translations
+- **@a8ec29b** — first-time contributor, Simplified Chinese translations ([#25](https://github.com/TeamAuraMusic/AuraMusic/pull/25))
 - **@giovanni125** (Giovanni Li Pomi) — first-time contributor
 - **@FraV1982** (Francesco Vangi) — first-time contributor
 - **weblate** (translation bot) and the Weblate community

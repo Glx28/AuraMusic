@@ -183,9 +183,9 @@ All 165 commits in `v3.1.0...v3.2.0`, by GitHub username:
 
 - **@chila254** (Franklin Finyange) — 138 commits
 - **@Mickael81** (Mickaël Binos) — 8 commits, translations
-- **@Glx28** — 4 commits and 2 pull requests (TV recommendations, TV sign-in D-pad)
+- **@Glx28** — 4 commits and 2 pull requests: [#23](https://github.com/TeamAuraMusic/AuraMusic/pull/23) (TV recommendation publishing and sign-in D-pad), [#24](https://github.com/TeamAuraMusic/AuraMusic/pull/24) (TV recommendation refreshes)
 - **@vityamolodets000-ctrl** — 3 commits
-- **@a8ec29b** — pull request #25, Simplified Chinese translations *(first-time contributor)*
+- **@a8ec29b** — pull request [#25](https://github.com/TeamAuraMusic/AuraMusic/pull/25), Simplified Chinese translations *(first-time contributor)*
 - **@giovanni125** (Giovanni Li Pomi) — 1 commit *(first-time contributor)*
 - **@FraV1982** (Francesco Vangi) — 1 commit *(first-time contributor)*
 - **weblate** — translation bot
