@@ -1106,7 +1106,7 @@
     <string name="open_artist">Открыть артиста</string>
     <string name="video_downloading">Загрузка</string>
     <string name="video_downloaded">Загружено • %1$s</string>
-    <string name="video_downloads">Скачанные видео</string>
+    <string name="video_downloads">Загрузки видео</string>
     <string name="no_video_downloads">Нет скачанных видео</string>
     <string name="video_download_quality">%1$s</string>
     <string name="open_channel">Открыть канал</string>
@@ -1137,4 +1137,31 @@
     <string name="login_email_hint">Введите адрес электронной почты и пароль здесь</string>
     <string name="email">Email</string>
     <string name="continue_with_google">Продолжить с Google</string>
+    <string name="video_download_failed">Загрузка не удалась - нажмите, чтобы повторить</string>
+    <string name="video_download_complete">Скачано</string>
+    <string name="downloads_music">Музыка</string>
+    <string name="downloads_videos">Видео</string>
+    <string name="video_downloads_audio">Скачанная музыка</string>
+    <string name="video_downloads_audio_empty">Пока нет скачанной музыки</string>
+    <string name="video_downloads_empty">Пока нет скачанных видео</string>
+    <string name="video_download_left">%1$s осталось</string>
+    <string name="video_download_retry">Попробовать снова</string>
+    <string name="video_download_unavailable">Это видео не получится скачать в таком качестве</string>
+    <string name="video_downloads_storage">Скачанные видео</string>
+    <string name="video_downloads_storage_summary">%1$s • %2$d видео</string>
+    <string name="video_downloads_storage_pending">%1$s • %2$d в процессе загрузки</string>
+    <string name="clear_video_downloads">Очистить загрузки видео</string>
+    <string name="clear_video_downloads_dialog">Удаляет все скачанные видео с устройства, включая те, которые все еще в процессе загрузки. Скачанная музыка при это не затрагивается.</string>
+    <string name="videos_section">Видео</string>
+    <string name="video_downloads_count">%1$d видео</string>
+    <string name="video_downloads_one">1 видео</string>
+    <string name="video_downloads_pending_count">%1$d в процессе загрузки</string>
+    <string name="video_downloads_none">Нет скачанных видео</string>
+    <plurals name="n_download">
+        <item quantity="one">%d загрузка</item>
+        <item quantity="few">%d загрузки</item>
+        <item quantity="many">%d загрузок</item>
+        <item quantity="other">%d загрузок</item>
+    </plurals>
+    <string name="video_player_watched">Просмотрено</string>
 </resources>
