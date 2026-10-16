@@ -710,7 +710,20 @@ object VideoPlaybackManager {
         val generation = ++loadGeneration
 
         val exo = attachToSharedPlayer(context)
+        // The outgoing video comes off the player now, before anything is fetched.
+        //
+        // It used to stay there - still audible, still on screen - through the whole
+        // network wait for the next one, so a video that had finished played on for
+        // several seconds more before the next took over. It is not wanted from the
+        // moment another one is chosen, so that is when it goes.
+        stopOutgoingVideo()
         handOverFromMusic(context)
+        if (exo == null) {
+            // Which used to be ignored, leaving state that said playing with nothing
+            // behind it and every control on it quietly doing nothing.
+            failLoad("Playback is not available", videoId, generation)
+            return
+        }
         _uiState.value = UiState(
             session = VideoSession(
                 videoId = videoId,
@@ -737,7 +750,11 @@ object VideoPlaybackManager {
                 publishedTimeText = publishedTimeText,
             ),
             minimized = false,
-            isPlaying = true,
+            // Not yet playing, because nothing is. This used to be asserted true
+            // before a byte of video existed, so every load that gave up on the way
+            // left the player claiming to play a video that was never going to move -
+            // the one shape every one of these failures has taken.
+            isPlaying = false,
             isBuffering = true,
             videoQuality = currentQuality,
             autoplayEnabled = currentAutoplay,
@@ -772,18 +789,15 @@ object VideoPlaybackManager {
         // The session is live: hand it to the widget, Discord presence and scrobbler.
         sharedConnectionRef?.get()?.service?.syncVideoIntegrations(sessionChanged = true)
         scope.launch {
-            val source = withContext(Dispatchers.IO) {
-                AuraPlayerUtils.getVideoStreamSource(videoId).getOrNull()
-            }
-            // Drop this result if the user moved on while we were extracting.
-            if (generation != loadGeneration || _uiState.value.session?.videoId != videoId) {
-                return@launch
-            }
-            if (source == null) {
-                _uiState.update { it.copy(isBuffering = false, error = "Could not load video") }
-                return@launch
-            }
-            loadMediaSourceInto(videoId, source, title, channelName, channelThumbnail ?: bestThumbnail, startPositionMs)
+            runVideoLoad(
+                context = context,
+                generation = generation,
+                videoId = videoId,
+                title = title,
+                channelName = channelName,
+                channelThumbnail = channelThumbnail ?: bestThumbnail,
+                startPositionMs = startPositionMs,
+            )
         }
         scope.launch {
             // Enrich metadata (fills gaps for views/description/channel avatar), then load content.
@@ -1062,14 +1076,14 @@ object VideoPlaybackManager {
             }
         }
 
-        // A television keeps its own queue, and the music service advances it. What
-        // follows appends the next video to the player's playlist so the end of one is
-        // a native advance - which on a television is a second, independent way of
-        // moving forward. Two of them means one press of next crosses two videos, and
-        // the video that flickers into place is the one being stepped over. So on a
-        // television the playlist is left to the one owner it has, and the queue
-        // above is all that needs to be kept: it is what the next button reads.
-        if (isTelevision(currentContext)) return
+        // A television keeps its own queue and the music service advances it, so
+        // appending the next video onto the player's playlist would be a second,
+        // independent way of moving forward - two of them meant one press of next
+        // crossed two videos, and the one that flickered into place was the one being
+        // stepped over. A television keeps its list here instead and reaches it from
+        // there; a telephone has no queue panel of its own and lets the player carry
+        // it. One answer, in one place, rather than a device check buried mid-function.
+        if (!queuesVideosOnPlayer(currentContext)) return
 
         val refreshed = _uiState.value
         val nextItem = refreshed.queue.firstOrNull { it.videoId != currentId && it.videoId !in playedVideoIds }
@@ -2058,6 +2072,9 @@ object VideoPlaybackManager {
                     title = session.title,
                     channelName = session.channelName,
                     channelThumbnail = session.channelThumbnail,
+                    // The video already on the player has its own tracks attached; a
+                    // fresh copy would drop them for the sake of a resolution change.
+                    subtitles = emptyList(),
                     startPositionMs = positionMs.coerceAtLeast(0L),
                 )
             }
@@ -2389,6 +2406,106 @@ object VideoPlaybackManager {
     }
 
     /**
+     * The one way a video reaches the player.
+     *
+     * Resolve, fetch its subtitles, build the item, hand it over - and if any of that
+     * cannot be done, say so. Every part of this used to be able to give up in
+     * silence from four different places, and each one left the same thing behind: a
+     * video with its details loaded, both ends of it at zero, nothing moving, and no
+     * error anywhere. Giving up is still allowed here, but only when a later load has
+     * taken over - in which case that one is answerable for the result.
+     */
+    private suspend fun runVideoLoad(
+        context: Context,
+        generation: Int,
+        videoId: String,
+        title: String,
+        channelName: String,
+        channelThumbnail: String?,
+        startPositionMs: Long,
+    ) {
+        // True once a later load owns the session. This load's answer is no longer the
+        // one on screen, so it has nothing to report.
+        fun superseded() =
+            generation != loadGeneration || _uiState.value.session?.videoId != videoId
+
+        val source = withContext(Dispatchers.IO) {
+            runCatching { AuraPlayerUtils.getVideoStreamSource(videoId).getOrNull() }.getOrNull()
+        }
+        if (superseded()) return
+        if (source == null) {
+            failLoad("Could not load this video", videoId, generation)
+            return
+        }
+
+        val service = sharedConnectionRef?.get()?.service
+        if (service == null) {
+            failLoad("Playback is not available", videoId, generation)
+            return
+        }
+
+        // Fetched alongside the stream so the video carries its subtitles from the
+        // first frame. Built in rather than applied afterwards, because attaching them
+        // once they arrived meant replacing the item mid-load, which left a video
+        // loaded, silent and not moving.
+        val subtitles = runCatching { service.loadSubtitlesFor(videoId) }.getOrDefault(emptyList())
+        if (superseded()) return
+
+        loadMediaSourceInto(
+            videoId = videoId,
+            source = source,
+            title = title,
+            channelName = channelName,
+            channelThumbnail = channelThumbnail,
+            subtitles = subtitles,
+            startPositionMs = startPositionMs,
+        )
+    }
+
+    /**
+     * Records a load that could not be completed.
+     *
+     * The point of it is that the player stops saying it is playing. Without this a
+     * load that fails looks exactly like one that is merely slow, which is how it was
+     * mistaken for one for so long.
+     */
+    private fun failLoad(message: String, videoId: String, generation: Int) {
+        if (generation != loadGeneration || _uiState.value.session?.videoId != videoId) return
+        player?.pause()
+        _uiState.update {
+            it.copy(isPlaying = false, isBuffering = false, error = message)
+        }
+    }
+
+    /**
+     * Takes the outgoing video off the player.
+     *
+     * Done at the moment a new video is chosen rather than when its source is ready,
+     * which is where it belonged - the old one is not wanted from the moment another
+     * is chosen, and leaving it there meant it played on, audibly, through the whole
+     * wait for the next.
+     */
+    private fun stopOutgoingVideo() {
+        val service = sharedConnectionRef?.get()?.service ?: return
+        if (!service.guestVideoActive.value) return
+        player?.pause()
+        _positionState.value = 0L to 0L
+        _uiState.update { it.copy(isPlaying = false, positionMs = 0L) }
+    }
+
+    /**
+     * Whether videos are queued onto the player itself.
+     *
+     * The one place the two surfaces are allowed to differ. A television has one owner
+     * of its queue and that is the music service, so a second way of moving forward
+     * written into the same playlist crossed two videos at a time; it keeps its list
+     * here and reaches it from the player screen instead. A telephone has no queue
+     * panel of its own, so the playlist carries it and the end of a video is a native
+     * advance.
+     */
+    private fun queuesVideosOnPlayer(context: Context?): Boolean = !isTelevision(context)
+
+    /**
      * Builds the [MergingMediaSource-like] source for [source], sets it on the
      * player, prepares, and replays — also rebuilding the media notification.
      * Used both for initial load and when the stream must be re-resolved
@@ -2400,23 +2517,16 @@ object VideoPlaybackManager {
         title: String,
         channelName: String,
         channelThumbnail: String?,
+        subtitles: List<androidx.media3.common.MediaItem.SubtitleConfiguration> = emptyList(),
         startPositionMs: Long = 0L,
     ) {
         val service = sharedConnectionRef?.get()?.service ?: return
-        // Fetched here, before the item is built, so the video carries its subtitles
-        // from the first frame.
-        //
-        // It used to be fetched afterwards and the item rebuilt once they arrived -
-        // a replace and a prepare in the middle of a video starting, which left it
-        // loaded, silent and not moving. It also means the tracks belong to this
-        // video rather than to whichever one happened to be on the player when they
-        // turned up. The stream was already being resolved over the network by the
-        // time this runs, so this waits alongside it rather than in front of it, and
-        // a video with no captions is no slower than one that has them.
-        val subtitles = runCatching { service.loadSubtitlesFor(videoId) }.getOrDefault(emptyList())
+        // Another load has taken over since this one was checked. It is answerable for
+        // the result, so there is nothing here to say.
         if (_uiState.value.session?.videoId != videoId) return
+        val context = currentContext ?: return
         val mediaSource = buildMediaSource(
-            currentContext ?: return,
+            context,
             videoId,
             source,
             title = title,
@@ -2427,7 +2537,8 @@ object VideoPlaybackManager {
         // The shared player swaps to the video as a guest: the music queue is snapshotted
         // on the first takeover and the session's notification shows the video's metadata.
         service.playGuestVideoSource(mediaSource, startPositionMs)
-        // A fresh single-item playlist replaced whatever the lookahead had queued.
+        // A fresh single-item playlist replaced whatever the lookahead had queued, so
+        // what is ahead on the player is no longer described by it either.
         queuedAheadVideoId = null
         queueUpcomingVideo()
     }
