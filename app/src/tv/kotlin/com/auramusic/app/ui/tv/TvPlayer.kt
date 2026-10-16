@@ -639,11 +639,13 @@ private fun TvVideoView(
         // in front of the picture, so a video waits on translations before it will
         // appear. Drawn over the top, the video starts when its stream does and the
         // words arrive whenever they arrive.
-        com.auramusic.app.video.VideoCaptionOverlay(
-            videoId = videoId,
-            player = activePlayer as? androidx.media3.exoplayer.ExoPlayer,
-            bottomPadding = 48.dp,
-        )
+        (activePlayer as? androidx.media3.exoplayer.ExoPlayer)?.let { exo ->
+            com.auramusic.app.video.VideoCaptionOverlay(
+                videoId = videoId,
+                player = exo,
+                bottomPadding = 48.dp,
+            )
+        }
 
         if (isVideoSwitching) {
             Box(
