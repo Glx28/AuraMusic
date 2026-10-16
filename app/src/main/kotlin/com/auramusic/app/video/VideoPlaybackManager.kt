@@ -1210,7 +1210,12 @@ object VideoPlaybackManager {
             _uiState.update {
                 it.copy(
                     recommendations = nextItems,
-                    queue = rebuildQueue(nextItems),
+                    // Behind what is already queued, like its two sibling branches.
+                    // This one replaced the list outright, so a video whose watch page
+                    // failed to list related videos - which lands here, after a retry
+                    // ladder, seconds after the next video started - quietly threw away
+                    // the video just played and everything behind it.
+                    queue = rebuildQueue(it.queue + nextItems),
                     isLoadingRecommendations = false,
                 )
             }
