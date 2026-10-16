@@ -822,6 +822,7 @@ fun TvPlayerScreen(
     // and next had nothing to move to.
     val videoUiState by com.auramusic.app.video.VideoPlaybackManager.uiState.collectAsState()
     val currentVideoId = videoUiState.session?.videoId
+    val videoQueueShuffled = videoUiState.queueOrder != null
     // Starting one video from this list replaces it with another, and between the
     // two the list is briefly rebuilt from the new video's own recommendations. The
     // panel fell out of that gap and showed nothing, then came back - so it is given
@@ -1520,11 +1521,33 @@ fun TvPlayerScreen(
                         modifier = Modifier.padding(top = secondaryTopPadding)
                     ) {
                         TvPlayerControlButton(
-                            onClick = { pc?.toggleShuffle() },
+                            onClick = {
+                                if (guestVideoActive) {
+                                    // The player is holding one video, so shuffling it
+                                    // moves nothing at all. The queue that video belongs
+                                    // to is the thing with a list to reorder, so that is
+                                    // what the button is for - and it means the same
+                                    // thing here as it does for music: shuffled, or back
+                                    // the way it was rather than shuffled again.
+                                    if (videoQueueShuffled) {
+                                        com.auramusic.app.video.VideoPlaybackManager.unreshuffleQueue()
+                                    } else {
+                                        com.auramusic.app.video.VideoPlaybackManager.reshuffleQueue()
+                                    }
+                                } else {
+                                    pc?.toggleShuffle()
+                                }
+                            },
                             icon = Icons.Filled.Shuffle,
                             contentDescription = "Shuffle",
-                            tint = if (pc?.shuffleModeEnabled?.value == true)
-                                MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.7f),
+                            tint = if (guestVideoActive) {
+                                if (videoQueueShuffled) MaterialTheme.colorScheme.primary
+                                else Color.White.copy(alpha = 0.7f)
+                            } else if (pc?.shuffleModeEnabled?.value == true) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                Color.White.copy(alpha = 0.7f)
+                            },
                             size = sideControlSize,
                         )
 

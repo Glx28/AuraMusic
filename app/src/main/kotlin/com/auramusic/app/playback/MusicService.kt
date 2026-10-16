@@ -1879,6 +1879,17 @@ class MusicService :
     val guestVideoActive: StateFlow<Boolean> = _guestVideoActive.asStateFlow()
 
     /**
+     * What the video on the player says it is, for the observers outside this class.
+     *
+     * A video above the merge threshold is presented as a synthetic media item that
+     * carries nothing of its own, so asking the item describes nothing - which is why
+     * a playing video reported "no song playing" in the player and left the top bar
+     * empty. Asked of the session instead, which is right either way.
+     */
+    fun currentGuestMetadata(): MediaMetadata? =
+        if (_guestVideoActive.value) guestVideoMetadata() else null
+
+    /**
      * The repeat mode the listener had chosen before a video took the player, so it
      * can be handed back when the video is over. Null while no video is on.
      */
@@ -4336,6 +4347,13 @@ class MusicService :
     private val videoSearchCache = java.util.concurrent.ConcurrentHashMap<String, com.auramusic.auravideo.AuraVideo.VideoSearchResult>()
     // Cache for video captions to avoid re-fetching on player collapse/expand
     val captionCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * The video whose subtitles were last asked for, so a reply that arrives after
+     * the listener has moved on can be dropped instead of being handed to the wrong
+     * video.
+     */
+    private var subtitleLoadVideoId: String? = null
     val captionAttemptedIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val _availableSubtitles = MutableStateFlow<List<com.auramusic.app.subtitles.SubtitleInfo>>(emptyList())
     val availableSubtitles: StateFlow<List<com.auramusic.app.subtitles.SubtitleInfo>> = _availableSubtitles.asStateFlow()
@@ -4378,110 +4396,81 @@ class MusicService :
     }
 
     /**
-     * Hands freshly fetched tracks to the video on the player.
-     *
-     * A video is built and started before its captions have been fetched, because
-     * waiting for them would put a network round trip between the listener and the
-     * picture. So when the tracks arrive the item is given them and prepared again,
-     * from the same position - which is why the button behind this list was never
-     * there: there was nothing on the item to select.
-     *
-     * Only for a video whose item holds a real source of its own. A merged
-     * video-audio item presents a placeholder that cannot be rebuilt, so it is left
-     * as it is rather than replaced with something that would not play.
-     */
-    private fun attachSubtitlesToCurrentVideo(configs: List<MediaItem.SubtitleConfiguration>) {
-        if (configs.isEmpty() || !_guestVideoActive.value) return
-        runCatching {
-            val index = player.currentMediaItemIndex
-            if (index < 0 || index >= player.mediaItemCount) return
-            val item = player.getMediaItemAt(index)
-            if (!item.localConfiguration?.subtitleConfigurations.isNullOrEmpty()) return
-            val uri = item.localConfiguration?.uri ?: return
-            if (uri.scheme == null || uri.scheme == "window") return
-            val position = player.currentPosition
-            val wasPlaying = player.playWhenReady
-            player.replaceMediaItem(index, item.buildUpon().setSubtitleConfigurations(configs).build())
-            player.prepare()
-            if (position > 0) player.seekTo(index, position)
-            player.playWhenReady = wasPlaying
-        }
-    }
-
-    /** The video whose subtitles were last asked for, so a late reply can be dropped. */
-    private var subtitleLoadVideoId: String? = null
-
-    /**
-     * Fetches a video's subtitle tracks, offers them, and selects the preferred one.
+     * Fetches a video's subtitle tracks, offers them, and returns them so the video
+     * can be built with them already attached.
      *
      * Shared by the switch to video mode and by a video played as a video from the
      * start. The latter never passes through the switch, and without this the player
      * offered no subtitles at all for exactly the videos it shows as videos - there
      * was no button, because there was never a list behind it.
+     *
+     * The tracks come back rather than being applied afterwards on purpose. A video's
+     * item was rebuilt once they arrived, which meant a replace and a prepare in the
+     * middle of the video starting: it arrived and then sat there, loaded, silent and
+     * not moving. Built in from the start there is nothing to undo.
      */
-    fun loadSubtitlesFor(videoId: String) {
-        if (videoId.isBlank()) return
+    suspend fun loadSubtitlesFor(videoId: String): List<MediaItem.SubtitleConfiguration> {
+        if (videoId.isBlank()) return emptyList()
         subtitleLoadVideoId = videoId
-        scope.launch {
-            try {
-                if (!dataStore.get(com.auramusic.app.constants.SubtitlesEnabledKey, true)) return@launch
-                val captionResult = withContext(Dispatchers.IO) {
-                    YouTube.getCaptionTracksWithDuration(videoId).getOrNull()
-                }
-                // The video may have moved on while its tracks were being fetched.
-                if (subtitleLoadVideoId != videoId) return@launch
-                val tracks = captionResult?.first.orEmpty()
-                val durationMs = captionResult?.second
-                if (tracks.isEmpty()) {
-                    _availableSubtitles.value = emptyList()
-                    _selectedSubtitleIndex.value = -1
-                    return@launch
-                }
-                val infos = mutableListOf<SubtitleInfo>()
-                val configs = mutableListOf<MediaItem.SubtitleConfiguration>()
-                for (track in tracks) {
-                    try {
-                        val text = withContext(Dispatchers.IO) {
-                            YouTube.fetchSubtitleFromCaptionTrack(track.baseUrl).getOrNull()
-                        }
-                        if (text.isNullOrBlank()) continue
-                        val vttText = YouTube.convertTimedTextToVttWithDuration(text, durationMs)
-                        val file = withContext(Dispatchers.IO) {
-                            File(cacheDir, "subtitle_${track.vssId}.vtt").apply { writeText(vttText) }
-                        }
-                        if (subtitleLoadVideoId != videoId) return@launch
-                        configs.add(
-                            MediaItem.SubtitleConfiguration.Builder(android.net.Uri.fromFile(file))
-                                .setMimeType(MimeTypes.TEXT_VTT)
-                                .setLanguage(track.languageCode)
-                                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                                .build(),
-                        )
-                        infos.add(
-                            SubtitleInfo(
-                                url = track.baseUrl,
-                                format = "vtt",
-                                language = java.util.Locale(track.languageCode).displayLanguage,
-                                languageCode = track.languageCode,
-                                isAutoGenerated = track.kind == "asr",
-                                cachedContent = vttText,
-                                cachedFilePath = file.absolutePath,
-                            ),
-                        )
-                    } catch (e: Exception) {
-                        Timber.e(e, "loadSubtitlesFor: failed to fetch one subtitle track")
-                    }
-                }
-                _availableSubtitles.value = infos.toList()
-                if (infos.isNotEmpty()) {
-                    attachSubtitlesToCurrentVideo(configs)
-                    val preferred = dataStore.get(com.auramusic.app.constants.SubtitleLanguageKey, "en")
-                    val index = infos.indexOfFirst { it.languageCode == preferred }
-                    selectSubtitle(if (index >= 0) index else 0)
-                }
-            } catch (e: Exception) {
-                Timber.e(e, "loadSubtitlesFor: error fetching caption tracks")
+        return try {
+            if (!dataStore.get(com.auramusic.app.constants.SubtitlesEnabledKey, true)) return emptyList()
+            val captionResult = withContext(Dispatchers.IO) {
+                YouTube.getCaptionTracksWithDuration(videoId).getOrNull()
             }
+            // The video may have moved on while its tracks were being fetched.
+            if (subtitleLoadVideoId != videoId) return emptyList()
+            val tracks = captionResult?.first.orEmpty()
+            val durationMs = captionResult?.second
+            if (tracks.isEmpty()) {
+                _availableSubtitles.value = emptyList()
+                _selectedSubtitleIndex.value = -1
+                return emptyList()
+            }
+            val infos = mutableListOf<SubtitleInfo>()
+            val configs = mutableListOf<MediaItem.SubtitleConfiguration>()
+            for (track in tracks) {
+                try {
+                    val text = withContext(Dispatchers.IO) {
+                        YouTube.fetchSubtitleFromCaptionTrack(track.baseUrl).getOrNull()
+                    }
+                    if (text.isNullOrBlank()) continue
+                    val vttText = YouTube.convertTimedTextToVttWithDuration(text, durationMs)
+                    val file = withContext(Dispatchers.IO) {
+                        File(cacheDir, "subtitle_${track.vssId}.vtt").apply { writeText(vttText) }
+                    }
+                    if (subtitleLoadVideoId != videoId) return emptyList()
+                    configs.add(
+                        MediaItem.SubtitleConfiguration.Builder(android.net.Uri.fromFile(file))
+                            .setMimeType(MimeTypes.TEXT_VTT)
+                            .setLanguage(track.languageCode)
+                            .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                            .build(),
+                    )
+                    infos.add(
+                        SubtitleInfo(
+                            url = track.baseUrl,
+                            format = "vtt",
+                            language = java.util.Locale(track.languageCode).displayLanguage,
+                            languageCode = track.languageCode,
+                            isAutoGenerated = track.kind == "asr",
+                            cachedContent = vttText,
+                            cachedFilePath = file.absolutePath,
+                        ),
+                    )
+                } catch (e: Exception) {
+                    Timber.e(e, "loadSubtitlesFor: failed to fetch one subtitle track")
+                }
+            }
+            _availableSubtitles.value = infos.toList()
+            if (infos.isNotEmpty()) {
+                val preferred = dataStore.get(com.auramusic.app.constants.SubtitleLanguageKey, "en")
+                val index = infos.indexOfFirst { it.languageCode == preferred }
+                selectSubtitle(if (index >= 0) index else 0)
+            }
+            configs
+        } catch (e: Exception) {
+            Timber.e(e, "loadSubtitlesFor: error fetching caption tracks")
+            emptyList()
         }
     }
 

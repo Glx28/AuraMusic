@@ -1223,6 +1223,12 @@ fun TvPlaybackSettingsScreen(
     val (videoModeEnabled, onVideoModeEnabledChange) = rememberPreference(
         com.auramusic.app.constants.VideoModeEnabledKey, true,
     )
+    val (tvDimOnIdle, onTvDimOnIdleChange) = rememberPreference(
+        com.auramusic.app.constants.TvDimOnIdleKey, true,
+    )
+    val (tvDimIdleSeconds, onTvDimIdleSecondsChange) = rememberPreference(
+        com.auramusic.app.constants.TvDimIdleSecondsKey, 60,
+    )
     val (seekExtraSeconds, onSeekExtraSecondsChange) = rememberPreference(
         com.auramusic.app.constants.SeekExtraSeconds, false,
     )
@@ -1348,6 +1354,35 @@ fun TvPlaybackSettingsScreen(
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(horizontal = 8.dp).padding(top = 12.dp, bottom = 4.dp),
             )
+        }
+
+        item {
+            TvContentToggleRow(
+                title = "Dim when idle",
+                // Says what it does rather than what it is: the screen is not switched
+                // off, it is turned down, and any key brings it back. A setting called
+                // "screen dimming" invites the question of whether it blanks the
+                // screen, which it does not and never did.
+                subtitle = "Turn the screen down when nothing has been pressed",
+                checked = tvDimOnIdle,
+                onCheckedChange = onTvDimOnIdleChange,
+                icon = Icons.Filled.DarkMode,
+            )
+        }
+
+        if (tvDimOnIdle) {
+            item {
+                TvSliderRow(
+                    title = "Dim after",
+                    subtitle = "$tvDimIdleSeconds seconds",
+                    value = tvDimIdleSeconds.toFloat(),
+                    valueRange = 15f..600f,
+                    // One stop per fifteen seconds reads as a dial rather than a
+                    // hundred clicks fighting each other over the same second.
+                    steps = 38,
+                    onValueChange = { onTvDimIdleSecondsChange(it.roundToInt()) },
+                )
+            }
         }
 
         item {

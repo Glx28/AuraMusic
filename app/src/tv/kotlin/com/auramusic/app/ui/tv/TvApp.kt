@@ -386,9 +386,19 @@ enum class TvSection(val label: String) {
       var isDimmed by remember { mutableStateOf(false) }
       val lastInteraction = remember { mutableStateOf(System.currentTimeMillis()) }
       val idleTimeoutMs = 120_000L
-      // Short enough that dimming is the first thing a still room does, and well
-      // before the screensaver, which is what eventually takes over.
-      val dimIdleTimeoutMs = 60_000L
+      // How long the room is left alone before the screen is turned down, and whether
+      // it happens at all. Both are the listener's to choose: the useful number is
+      // whatever room the television is in, and a room that does not want it dimmed
+      // at all should not have to wait the timer out to say so.
+      val (dimOnIdlePref, _) = rememberPreference(
+          com.auramusic.app.constants.TvDimOnIdleKey,
+          defaultValue = true,
+      )
+      val (dimIdleSecondsPref, _) = rememberPreference(
+          com.auramusic.app.constants.TvDimIdleSecondsKey,
+          defaultValue = 60,
+      )
+      val dimIdleTimeoutMs = (dimIdleSecondsPref.coerceIn(15, 600) * 1000L)
       val resetIdle: () -> Unit = {
           lastInteraction.value = System.currentTimeMillis()
           if (isScreensaverActive) isScreensaverActive = false
@@ -401,7 +411,7 @@ enum class TvSection(val label: String) {
               // Whatever is on screen - a shelf, a video, lyrics, nothing playing
               // at all - dims the same way. It is the room going quiet, not the
               // music.
-              if (!isDimmed && !isScreensaverActive && idleFor > dimIdleTimeoutMs) {
+              if (dimOnIdlePref && !isDimmed && !isScreensaverActive && idleFor > dimIdleTimeoutMs) {
                   isDimmed = true
               }
               val hasSong = currentSong != null || currentMediaMetadata != null
@@ -2596,7 +2606,7 @@ fun TvSearchScreen(
                     ) { item ->
                         TvYTSearchResultItem(
                             item = item,
-                            onClick = { saveQueryToHistory(); handleYTSearchItemClick(item, playerConnection, navigator) },
+                            onClick = { saveQueryToHistory(); handleYTSearchItemClick(context, item, playerConnection, navigator) },
                             modifier = Modifier.onFocusChanged { state -> if (state.hasFocus) focusedItemIndex = sectionIndex + 1 }
                         )
                     }
@@ -2621,7 +2631,7 @@ fun TvSearchScreen(
                     items(ytSongs, key = { "song_${it.id}" }) { item ->
                         TvYTSearchResultItem(
                             item = item,
-                            onClick = { saveQueryToHistory(); handleYTSearchItemClick(item, playerConnection, navigator) },
+                            onClick = { saveQueryToHistory(); handleYTSearchItemClick(context, item, playerConnection, navigator) },
                             modifier = Modifier.onFocusChanged { state -> if (state.hasFocus) focusedItemIndex = 2 }
                         )
                     }
@@ -2640,7 +2650,7 @@ fun TvSearchScreen(
                     items(ytArtists, key = { it.id ?: it.title }) { item ->
                         TvYTSearchResultItem(
                             item = item,
-                            onClick = { saveQueryToHistory(); handleYTSearchItemClick(item, playerConnection, navigator) },
+                            onClick = { saveQueryToHistory(); handleYTSearchItemClick(context, item, playerConnection, navigator) },
                             modifier = Modifier.onFocusChanged { state -> if (state.hasFocus) focusedItemIndex = 2 }
                         )
                     }
@@ -2659,7 +2669,7 @@ fun TvSearchScreen(
                     items(ytAlbums, key = { it.browseId ?: it.id }) { item ->
                         TvYTSearchResultItem(
                             item = item,
-                            onClick = { saveQueryToHistory(); handleYTSearchItemClick(item, playerConnection, navigator) },
+                            onClick = { saveQueryToHistory(); handleYTSearchItemClick(context, item, playerConnection, navigator) },
                             modifier = Modifier.onFocusChanged { state -> if (state.hasFocus) focusedItemIndex = 2 }
                         )
                     }
@@ -2678,7 +2688,7 @@ fun TvSearchScreen(
                     items(ytPlaylists, key = { "ytplaylist_${it.id}" }) { item ->
                         TvYTSearchResultItem(
                             item = item,
-                            onClick = { saveQueryToHistory(); handleYTSearchItemClick(item, playerConnection, navigator) },
+                            onClick = { saveQueryToHistory(); handleYTSearchItemClick(context, item, playerConnection, navigator) },
                             modifier = Modifier.onFocusChanged { state -> if (state.hasFocus) focusedItemIndex = 2 }
                         )
                     }
@@ -2971,10 +2981,19 @@ fun handleSearchItemClick(
     }
 }
 
-fun handleYTSearchItemClick(item: YTItem, playerConnection: PlayerConnection?, navigator: TvNavigator) {
+fun handleYTSearchItemClick(
+    context: Context,
+    item: YTItem,
+    playerConnection: PlayerConnection?,
+    navigator: TvNavigator,
+) {
     when (item) {
         is SongItem -> {
-            playerConnection?.playQueue(YouTubeQueue(WatchEndpoint(videoId = item.id)))
+            // Decided in the same place as every other shelf. Search went straight to
+            // the music queue, so a video found by searching arrived as sound first
+            // and a picture afterwards, if at all - while the same video found on an
+            // artist shelf opened as a video.
+            TvPlayback.playVideoOrSong(context, playerConnection, navigator, item)
         }
                                 is AlbumItem -> {
                                     val browseId = item.browseId
@@ -3247,6 +3266,11 @@ fun MediaCard(
 @Composable
 fun LocalItemRow(title: String, localItems: List<LocalItem>, playerConnection: PlayerConnection?, modifier: Modifier = Modifier, onItemFocused: ((FocusedItemInfo?) -> Unit)? = null) {
     val navigator = LocalTvNavigator.current
+    // A video song is handed to the video pipeline, which takes a context. This row
+    // used to send every song straight to the music queue, which is why a video
+    // reached from Keep listening arrived as sound first - while the same video
+    // reached from an artist shelf opened as one.
+    val rowContext = LocalContext.current
 
     Column(
         modifier = modifier,
@@ -3326,7 +3350,7 @@ fun LocalItemRow(title: String, localItems: List<LocalItem>, playerConnection: P
                         title = item.song.title,
                         subtitle = item.artists.joinToString(", ") { it.name },
                         thumbnailUrl = item.song.thumbnailUrl,
-                        onClick = { playerConnection?.playQueue(YouTubeQueue.radio(item.toMediaMetadata())) },
+                        onClick = { TvPlayback.playLibrarySong(rowContext, playerConnection, navigator, item) },
                         onFocusChanged = onItemFocused,
                     )
                 }

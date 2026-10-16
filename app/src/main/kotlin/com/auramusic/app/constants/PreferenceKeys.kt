@@ -233,6 +233,17 @@ val AudioOffload = booleanPreferencesKey("enableOffload")
 val VideoModeEnabledKey = booleanPreferencesKey("videoModeEnabled")
 val AuraCanvasEnabledKey = booleanPreferencesKey("auraCanvasEnabled")
 
+/** Whether a television dims the whole screen when nothing has been pressed. */
+val TvDimOnIdleKey = booleanPreferencesKey("tvDimOnIdle")
+
+/**
+ * How long a television stays untouched before it dims, in seconds.
+ *
+ * A number rather than a set of choices because the useful answer is whatever room
+ * the television is in, and the person in it knows it.
+ */
+val TvDimIdleSecondsKey = intPreferencesKey("tvDimIdleSeconds")
+
 val PersistentQueueKey = booleanPreferencesKey("persistentQueue")
 val PersistentShuffleAcrossQueuesKey = booleanPreferencesKey("persistentShuffleAcrossQueues")
 val RememberShuffleAndRepeatKey = booleanPreferencesKey("rememberShuffleAndRepeat")

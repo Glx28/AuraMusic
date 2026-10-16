@@ -512,7 +512,11 @@ import timber.log.Timber
         reason: Int,
     ) {
         if (service.isInjectingVideoSourcePublic) return
-        mediaMetadata.value = mediaItem?.metadata
+        // A video is asked of the session, not of the item. Above the merge threshold
+        // the item is a synthetic one carrying no details at all, so reading it made a
+        // playing video report itself as nothing - "no song playing" over the progress
+        // bar, and an empty top bar.
+        mediaMetadata.value = service.currentGuestMetadata() ?: mediaItem?.metadata
         currentMediaItemIndex.value = player.currentMediaItemIndex
         currentWindowIndex.value = player.getCurrentQueueIndex()
         updateCanSkipPreviousAndNext()

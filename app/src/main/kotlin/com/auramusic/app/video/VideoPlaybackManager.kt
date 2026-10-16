@@ -209,6 +209,12 @@ object VideoPlaybackManager {
         /** Storyboard template for scrub previews; null when the client gave none. */
         val storyboardSpec: String? = null,
         val queue: List<RecommendationItem> = emptyList(),
+        /**
+         * The order the queue had before it was shuffled, and null when it has not
+         * been. So turning the shuffle off is not "shuffle again", which would give a
+         * second different order, but the one that was there before.
+         */
+        val queueOrder: List<RecommendationItem>? = null,
         val recommendationsContinuation: String? = null,
         val isLoadingRecommendations: Boolean = false,
         val isLoadingMoreRecommendations: Boolean = false,
@@ -550,6 +556,21 @@ object VideoPlaybackManager {
             _uiState.update { it.copy(isBuffering = false, error = error.message ?: "Playback error") }
         }
 
+        override fun onRepeatModeChanged(repeatMode: Int) {
+            if (!isGuestActive()) return
+            // A television's playlist is the one video that is playing, so repeat-all
+            // would loop it forever: the video reached its end, the player started it
+            // again, and it never got to the next one. The mode is stood back down
+            // wherever it is set from - the transport button, the settings, or the
+            // service - rather than only once, at the moment the video started, where
+            // anything set afterwards quietly undid it. Repeat-one is left alone: that
+            // is the listener asking for this video again.
+            val exo = player ?: return
+            if (repeatMode == Player.REPEAT_MODE_ALL && exo.mediaItemCount <= 1) {
+                exo.repeatMode = Player.REPEAT_MODE_OFF
+            }
+        }
+
         override fun onVideoSizeChanged(videoSize: VideoSize) {
             if (!isGuestActive()) return
             // The PiP window is sized from this, and a stale ratio makes the window letterbox
@@ -723,6 +744,16 @@ object VideoPlaybackManager {
             // loads afterwards can only confirm it, never take it back.
             isLiked = isVideoLiked(videoId),
             isSubscribed = isChannelSubscribed(channelId),
+            // The queue belongs to the session, not to the video. It used to be reset
+            // along with everything else here, so every video arrived with an empty
+            // list and then refilled it from its own recommendations - which is why
+            // moving to the next video reshuffled the whole list, and why the video
+            // queue never behaved like the music queue, where one list is built once
+            // and a pointer moves through it. What is already queued is carried over,
+            // and whatever is about to be fetched goes behind it rather than in front.
+            queue = current.queue,
+            recommendations = current.recommendations,
+            queueOrder = current.queueOrder,
         )
         // Rebuild the media notification immediately with the NEW video's metadata.
         // This closes the window where the shade would otherwise keep showing the
@@ -959,6 +990,44 @@ object VideoPlaybackManager {
     }
 
     /**
+     * Whether the queue is currently in a shuffled order.
+     *
+     * Read by the player so the button says what turning it will do, which is the
+     * same thing the music queue's shuffle button does.
+     */
+    val isQueueShuffled: Boolean get() = _uiState.value.queueOrder != null
+
+    /**
+     * Shuffles what comes next, and keeps the order it replaced.
+     *
+     * The list that is already there is the session's, so this is the only thing
+     * that reorders it - which is what makes turning it back off able to mean
+     * "put it back" rather than "give me a different order again".
+     */
+    fun reshuffleQueue() {
+        _uiState.update { state ->
+            val session = state.session
+            val ahead = state.queue.filter { it.videoId != session?.videoId }
+            // One video behind the one playing is not a list to shuffle; shuffling it
+            // would only make the next button land somewhere arbitrary.
+            if (ahead.size < 2) return@update state
+            val head = state.queue.filter { it.videoId == session?.videoId }
+            state.copy(
+                queue = rebuildQueue(head + ahead.shuffled()),
+                queueOrder = state.queueOrder ?: ahead,
+            )
+        }
+    }
+
+    /** Puts the queue back the way it was before it was shuffled. */
+    fun unreshuffleQueue() {
+        _uiState.update { state ->
+            val order = state.queueOrder ?: return@update state
+            state.copy(queue = rebuildQueue(order), queueOrder = null)
+        }
+    }
+
+    /**
      * Whether this video has already been played this session.
      *
      * Shown on the Up next list so a video that has been watched reads as watched,
@@ -1098,7 +1167,12 @@ object VideoPlaybackManager {
             _uiState.update {
                 it.copy(
                     recommendations = items,
-                    queue = rebuildQueue(items),
+                    // Behind the list that is already queued, not instead of it. This
+                    // video's recommendations join the session's queue at the end, the
+                    // way more songs join a radio's queue, so what the listener is
+                    // about to watch is not reordered underneath them by the fact that
+                    // the video in front of them changed.
+                    queue = rebuildQueue(it.queue + items),
                     recommendationsContinuation = metadata?.relatedContinuation(),
                     isLoadingRecommendations = false,
                 )
@@ -1159,7 +1233,9 @@ object VideoPlaybackManager {
             _uiState.update {
                 it.copy(
                     recommendations = relatedItems,
-                    queue = rebuildQueue(relatedItems),
+                    // Behind what is already queued, for the same reason: this list is
+                    // the session's, and where it comes from must not decide its order.
+                    queue = rebuildQueue(it.queue + relatedItems),
                     isLoadingRecommendations = false,
                 )
             }
@@ -2298,7 +2374,7 @@ object VideoPlaybackManager {
      * Used both for initial load and when the stream must be re-resolved
      * (e.g. quality change mid-playback).
      */
-    private fun loadMediaSourceInto(
+    private suspend fun loadMediaSourceInto(
         videoId: String,
         source: com.auramusic.auravideo.AuraVideo.VideoStreamSource,
         title: String,
@@ -2307,6 +2383,18 @@ object VideoPlaybackManager {
         startPositionMs: Long = 0L,
     ) {
         val service = sharedConnectionRef?.get()?.service ?: return
+        // Fetched here, before the item is built, so the video carries its subtitles
+        // from the first frame.
+        //
+        // It used to be fetched afterwards and the item rebuilt once they arrived -
+        // a replace and a prepare in the middle of a video starting, which left it
+        // loaded, silent and not moving. It also means the tracks belong to this
+        // video rather than to whichever one happened to be on the player when they
+        // turned up. The stream was already being resolved over the network by the
+        // time this runs, so this waits alongside it rather than in front of it, and
+        // a video with no captions is no slower than one that has them.
+        val subtitles = runCatching { service.loadSubtitlesFor(videoId) }.getOrDefault(emptyList())
+        if (_uiState.value.session?.videoId != videoId) return
         val mediaSource = buildMediaSource(
             currentContext ?: return,
             videoId,
@@ -2314,16 +2402,11 @@ object VideoPlaybackManager {
             title = title,
             channelName = channelName,
             channelThumbnail = channelThumbnail,
+            subtitles = subtitles,
         )
         // The shared player swaps to the video as a guest: the music queue is snapshotted
         // on the first takeover and the session's notification shows the video's metadata.
         service.playGuestVideoSource(mediaSource, startPositionMs)
-        // Subtitles are the service's to fetch - it holds the track list, the
-        // preference and the cache - and it only used to fetch them on the way
-        // through a video-mode switch. A video played as a video never takes that
-        // way, so it was offered none at all: there was no button, because there
-        // was never a list behind it.
-        runCatching { service.loadSubtitlesFor(videoId) }
         // A fresh single-item playlist replaced whatever the lookahead had queued.
         queuedAheadVideoId = null
         queueUpcomingVideo()
@@ -2523,6 +2606,7 @@ object VideoPlaybackManager {
         title: String,
         channelName: String,
         channelThumbnail: String?,
+        subtitles: List<androidx.media3.common.MediaItem.SubtitleConfiguration> = emptyList(),
     ): androidx.media3.exoplayer.source.MediaSource {
         val factory = ProgressiveMediaSource.Factory(
             VideoPlayerSupport.createDataSourceFactory(context),
@@ -2572,6 +2656,7 @@ object VideoPlaybackManager {
                     .setMimeType(source.mimeType)
                     .setMediaId(videoId)
                     .setTag(appMetadata)
+                    .apply { if (subtitles.isNotEmpty()) setSubtitleConfigurations(subtitles) }
                     .setMediaMetadata(mediaMetadata)
                     .build()
                 factory.createMediaSource(mediaItem)
@@ -2582,6 +2667,7 @@ object VideoPlaybackManager {
                     .setMimeType(source.videoMimeType)
                     .setMediaId(videoId + "_v")
                     .setTag(appMetadata)
+                    .apply { if (subtitles.isNotEmpty()) setSubtitleConfigurations(subtitles) }
                     .setMediaMetadata(mediaMetadata)
                     .build()
                 val videoSource = factory.createMediaSource(videoMediaItem)
