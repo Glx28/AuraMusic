@@ -1626,21 +1626,13 @@ object VideoPlaybackManager {
             return
         }
 
-        // Otherwise a queued item is only the next one if it is a *different* video.
-        // A merged video-audio source carries the video's id on both halves, so the
-        // comparison allows for that rather than reading its own halves as a change.
-        if (exo != null && currentId != null && exo.hasNextMediaItem()) {
-            val nextId = runCatching {
-                exo.getMediaItemAt(exo.currentMediaItemIndex + 1).mediaId
-            }.getOrNull()
-            val isAnotherVideo = nextId != null &&
-                nextId != currentId &&
-                !nextId.startsWith("${currentId}_")
-            if (isAnotherVideo) {
-                exo.seekToNextMediaItem()
-                return
-            }
-        }
+        // If a different video is queued on the player itself, moving onto it is a
+        // seek rather than a load. Asked of the service, which owns the playlist and
+        // knows what its ids mean - a merged source is two halves of one video, and
+        // reading that here is how "the next item" came to be the video already
+        // playing.
+        val service = sharedConnectionRef?.get()?.service
+        if (service?.seekToQueuedVideo(next = true) == true) return
         val queue = _uiState.value.queue
         if (queue.isEmpty()) return
         // From just after the one playing, then around. Not "anything that is not this
@@ -1674,8 +1666,7 @@ object VideoPlaybackManager {
             exo.play()
             return
         }
-        if (exo != null && exo.hasPreviousMediaItem()) {
-            exo.seekToPreviousMediaItem()
+        if (sharedConnectionRef?.get()?.service?.seekToQueuedVideo(next = false) == true) {
             return
         }
         val queue = _uiState.value.queue
@@ -2089,14 +2080,10 @@ object VideoPlaybackManager {
         } else {
             // Anything the lookahead queued behind the current video would still advance
             // at the end of the item, so the playlist is trimmed back to just what is
-            // playing.
+            // playing. The service owns the playlist; this only decides that it should
+            // no longer describe one.
             queuedAheadVideoId = null
-            player?.let { exo ->
-                val currentIndex = exo.currentMediaItemIndex
-                for (index in exo.mediaItemCount - 1 downTo 0) {
-                    if (index != currentIndex) exo.removeMediaItem(index)
-                }
-            }
+            sharedConnectionRef?.get()?.service?.clearVideoPlaylist()
         }
         currentContext?.let { ctx ->
             scope.launch {
@@ -2115,13 +2102,11 @@ object VideoPlaybackManager {
         }
         if (queuedAheadVideoId == videoId) queuedAheadVideoId = null
         // Keep the shared playlist in step: a removed video must not come up next.
-        val exo = player ?: return
-        for (index in 0 until exo.mediaItemCount) {
-            if (index != exo.currentMediaItemIndex && exo.getMediaItemAt(index).mediaId == videoId) {
-                exo.removeMediaItem(index)
-                break
-            }
-        }
+        // Asked of the service, which owns the playlist and matches on the video
+        // rather than on the item's id - the two halves of a merged source do not
+        // carry it, so matching on the id removed nothing and the video was reached
+        // again a moment later as though it had never been taken out.
+        sharedConnectionRef?.get()?.service?.removeQueuedVideo(videoId)
     }
 
     /** Clears the pending playback queue (Up next stays visible). */

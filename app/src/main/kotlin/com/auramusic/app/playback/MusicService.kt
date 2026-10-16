@@ -1926,6 +1926,81 @@ class MusicService :
     }
 
     /**
+     * The video a playlist item belongs to.
+     *
+     * A merged video-audio source is built as two halves, so the item on the player
+     * carries the video's id with a suffix on it. Reading that back as though it were
+     * a video's plain id is how "the item after this one" came to mean the video
+     * already playing - which is what made a skip replay it instead of moving on.
+     */
+    private fun MediaItem?.videoIdOf(): String? {
+        val id = this?.mediaId ?: return null
+        return if (id.length > 11 && (id.endsWith("_v") || id.endsWith("_a"))) {
+            id.dropLast(2)
+        } else {
+            id
+        }
+    }
+
+    /**
+     * What is on the player, as far as the video pipeline is concerned.
+     *
+     * These live here rather than over there because this is the class that owns the
+     * playlist. The video pipeline used to count its items and index into it to
+     * decide what came next, which is how the two came to disagree about what the
+     * playlist was - one of them rewriting it while the other was reading it, and
+     * each learning of the other's half of the arrangement only afterwards.
+     */
+    fun hasNextQueuedVideo(): Boolean = queuedVideoBeside(offset = 1)
+
+    fun hasPreviousQueuedVideo(): Boolean = queuedVideoBeside(offset = -1)
+
+    private fun queuedVideoBeside(offset: Int): Boolean {
+        if (!_guestVideoActive.value) return false
+        val exo = player
+        val currentId = VideoPlaybackManager.uiState.value.session?.videoId ?: return false
+        val otherId = runCatching {
+            exo.getMediaItemAt(exo.currentMediaItemIndex + offset).videoIdOf()
+        }.getOrNull()
+        return otherId != null && otherId != currentId
+    }
+
+    /** Moves to the next or previous queued video, answering whether it moved. */
+    fun seekToQueuedVideo(next: Boolean): Boolean {
+        if (next && !hasNextQueuedVideo()) return false
+        if (!next && !hasPreviousQueuedVideo()) return false
+        if (next) player.seekToNextMediaItem() else player.seekToPreviousMediaItem()
+        return true
+    }
+
+    /** Empties the video playlist, leaving what is playing on the player. */
+    fun clearVideoPlaylist() {
+        val exo = player
+        val current = exo.currentMediaItemIndex
+        for (index in exo.mediaItemCount - 1 downTo 0) {
+            if (index != current) runCatching { exo.removeMediaItem(index) }
+        }
+    }
+
+    /**
+     * Takes a video out of the playlist.
+     *
+     * Matched on the video rather than on the item's id, because the two halves of a
+     * merged source do not carry it - which is why removing a queued video used to
+     * leave it on the player, where it was reached again a moment later as though
+     * nothing had happened.
+     */
+    fun removeQueuedVideo(videoId: String) {
+        val exo = player
+        val current = exo.currentMediaItemIndex
+        for (index in exo.mediaItemCount - 1 downTo 0) {
+            if (index == current) continue
+            val isIt = runCatching { exo.getMediaItemAt(index).videoIdOf() }.getOrNull() == videoId
+            if (isIt) runCatching { exo.removeMediaItem(index) }
+        }
+    }
+
+    /**
      * Hands the player back to music. With [restoreQueue] the snapshot taken by
      * [playGuestVideoSource] is reloaded, paused, exactly where the listener left it.
      */
