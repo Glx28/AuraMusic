@@ -1076,13 +1076,16 @@ object VideoPlaybackManager {
             }
         }
 
-        // A television keeps its own queue and the music service advances it, so
-        // appending the next video onto the player's playlist would be a second,
-        // independent way of moving forward - two of them meant one press of next
-        // crossed two videos, and the one that flickered into place was the one being
-        // stepped over. A television keeps its list here instead and reaches it from
-        // there; a telephone has no queue panel of its own and lets the player carry
-        // it. One answer, in one place, rather than a device check buried mid-function.
+        // Nothing is appended to the player's playlist, on anything.
+        //
+        // A playlist entry for the next video is a second copy of the queue, and a
+        // second copy can disagree with the first: a video taken off the queue stays
+        // on the playlist, is reached again later, and leaves the player holding
+        // something it will not show - a black picture with both ends at zero and no
+        // error to explain it. It can also land mid-load, while the video actually
+        // being played is still preparing, and leave that one loaded and black too.
+        //
+        // A television never did this and works. A telephone did, and did not.
         if (!queuesVideosOnPlayer(currentContext)) return
 
         val refreshed = _uiState.value
@@ -2479,16 +2482,20 @@ object VideoPlaybackManager {
     }
 
     /**
-     * Whether videos are queued onto the player itself.
+     * Whether videos are queued onto the player's playlist.
      *
-     * The one place the two surfaces are allowed to differ. A television has one owner
-     * of its queue and that is the music service, so a second way of moving forward
-     * written into the same playlist crossed two videos at a time; it keeps its list
-     * here and reaches it from the player screen instead. A telephone has no queue
-     * panel of its own, so the playlist carries it and the end of a video is a native
-     * advance.
+     * Never. The queue has one owner and that is this class; the playlist is the
+     * player's, and a second copy of the queue on it can disagree with the first.
+     *
+     * It was a television-and-telephone difference once - a television kept its list
+     * here and reached it from the player screen, while a telephone had no queue panel
+     * and let the playlist carry it. The telephone's copy is the one that went wrong,
+     * so the difference is gone and the answer is the same everywhere.
+     *
+     * What it costs is the end of a video being a load rather than a seek. That is
+     * what a television has always done, and it works.
      */
-    private fun queuesVideosOnPlayer(context: Context?): Boolean = !isTelevision(context)
+    private fun queuesVideosOnPlayer(context: Context?): Boolean = false
 
     /**
      * Builds the [MergingMediaSource-like] source for [source], sets it on the
