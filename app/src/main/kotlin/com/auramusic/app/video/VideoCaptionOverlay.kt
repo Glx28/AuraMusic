@@ -75,6 +75,15 @@ fun VideoCaptionOverlay(
     player: ExoPlayer,
     bottomPadding: Dp,
     modifier: Modifier = Modifier,
+    /**
+     * Multiplies the chosen caption size, for a screen that is not held.
+     *
+     * The setting itself is a phone setting - a size that reads well at arm's
+     * length is unreadable across a room, and there is no value of it that is right
+     * for both. Scaling here rather than moving the default means the setting still
+     * means the same thing everywhere it is edited, and the room decides for itself.
+     */
+    fontSizeScale: Float = 1f,
 ) {
     val subtitlesEnabled by rememberPreference(SubtitlesEnabledKey, true)
     val language by rememberPreference(SubtitleLanguageKey, "auto")
@@ -140,7 +149,7 @@ fun VideoCaptionOverlay(
         Text(
             text = cue,
             color = Color.White,
-            fontSize = fontSize.coerceIn(10f, 32f).sp,
+            fontSize = (fontSize * fontSizeScale).coerceIn(10f, 64f).sp,
             fontWeight = FontWeight.Medium,
             textAlign = TextAlign.Center,
             maxLines = 3,

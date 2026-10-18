@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
  import androidx.compose.foundation.layout.width
  import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
  import androidx.compose.foundation.shape.CircleShape
@@ -639,12 +640,27 @@ private fun TvVideoView(
         // in front of the picture, so a video waits on translations before it will
         // appear. Drawn over the top, the video starts when its stream does and the
         // words arrive whenever they arrive.
-        (activePlayer as? androidx.media3.exoplayer.ExoPlayer)?.let { exo ->
-            com.auramusic.app.video.VideoCaptionOverlay(
-                videoId = videoId,
-                player = exo,
-                bottomPadding = 48.dp,
-            )
+        //
+        // Anchored to the bottom of the picture rather than left wherever it lands:
+        // this view centres its contents, which put the words in the middle of the
+        // frame over the thing being watched.
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+            (activePlayer as? androidx.media3.exoplayer.ExoPlayer)?.let { exo ->
+                com.auramusic.app.video.VideoCaptionOverlay(
+                    videoId = videoId,
+                    player = exo,
+                    // Clear of the transport controls in fullscreen, which is where
+                    // the captions would otherwise sit on top of.
+                    bottomPadding = 132.dp,
+                    // Readable from a sofa. The size setting is a phone setting; this
+                    // is the room asking for bigger, without the setting itself
+                    // meaning something different on a television than it does in a hand.
+                    fontSizeScale = 1.8f,
+                )
+            }
         }
 
         if (isVideoSwitching) {
@@ -839,6 +855,7 @@ fun TvPlayerScreen(
     // and next had nothing to move to.
     val videoUiState by com.auramusic.app.video.VideoPlaybackManager.uiState.collectAsState()
     val currentVideoId = videoUiState.session?.videoId
+
     val videoQueueShuffled = videoUiState.queueOrder != null
     // Starting one video from this list replaces it with another, and between the
     // two the list is briefly rebuilt from the new video's own recommendations. The
@@ -859,6 +876,58 @@ fun TvPlayerScreen(
             )
         }.orEmpty()
     }
+    // The queue follows what is playing.
+    //
+    // A queue that does not move is a list to read rather than a place to be: when
+    // the song changes, the row playing is somewhere off-screen with nothing on it
+    // saying so. Each panel scrolls to wherever the current item now is, so the list
+    // is always showing the one thing that matters.
+    //
+    // Only when the current item actually changes, and only while the panel is
+    // closed - a list that moves under the remote while they are in it is a list
+    // they cannot read. Their own scrolling is left alone entirely.
+    val splitQueueListState = rememberLazyListState()
+    val fullQueueListState = rememberLazyListState()
+    LaunchedEffect(currentWindowIndex, guestVideoActive, currentVideoId) {
+        if (fullscreenQueueOpen) return@LaunchedEffect
+        val index = if (guestVideoActive) {
+            videoQueue.indexOfFirst { it.videoId == currentVideoId }
+        } else {
+            currentWindowIndex
+        }
+        if (index < 0) return@LaunchedEffect
+        // A short distance is a nudge; anything further is a jump, and animating
+        // through a whole queue to reach the end is something to wait for rather
+        // than watch.
+        // Is it on screen already? Glide if so, jump if not - animating through
+        // a whole queue to reach the end is something to wait for, not watch.
+        if (splitQueueListState.layoutInfo.visibleItemsInfo.any { it.index == index }) {
+            splitQueueListState.animateScrollToItem(index)
+        } else {
+            splitQueueListState.scrollToItem(index)
+        }
+    }
+
+    // The open panel follows too, but only when the remote is not on it - someone
+    // reading down a queue should not have it move out from under them. Once focus
+    // is elsewhere in the panel again, it resumes following what is playing.
+    LaunchedEffect(currentWindowIndex, guestVideoActive, currentVideoId, focusInQueue) {
+        if (!fullscreenQueueOpen || focusInQueue) return@LaunchedEffect
+        val index = if (guestVideoActive) {
+            videoQueue.indexOfFirst { it.videoId == currentVideoId }
+        } else {
+            currentWindowIndex
+        }
+        if (index < 0) return@LaunchedEffect
+        // Is it on screen already? Glide if so, jump if not - animating through
+        // a whole queue to reach the end is something to wait for, not watch.
+        if (fullQueueListState.layoutInfo.visibleItemsInfo.any { it.index == index }) {
+            fullQueueListState.animateScrollToItem(index)
+        } else {
+            fullQueueListState.scrollToItem(index)
+        }
+    }
+
     // Subtitles are offered by the same service that offers them on the phone, so
     // what is listed here is what is listed there and choosing one does the same.
     // The same switch the caption overlay and the phone player read. Captions are
@@ -1668,6 +1737,7 @@ fun TvPlayerScreen(
                     )
 
                     LazyColumn(
+                        state = splitQueueListState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -2226,6 +2296,7 @@ fun TvPlayerScreen(
                                 }
 
                                 LazyColumn(
+                                    state = fullQueueListState,
                                     modifier = Modifier.fillMaxSize(),
                                     contentPadding = PaddingValues(vertical = 12.dp),
                                     verticalArrangement = Arrangement.spacedBy(10.dp),
